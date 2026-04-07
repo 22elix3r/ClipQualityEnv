@@ -73,9 +73,9 @@ def derive_clip_difficulty(clip: dict[str, Any], rubric: RubricState) -> str:
 
 
 MANUAL_ASSIGNMENT: dict[str, list[str]] = {
-    "easy": ["clip_017", "clip_012", "clip_007", "clip_013", "clip_019"],
-    "medium": ["clip_001", "clip_003", "clip_015", "clip_005", "clip_018"],
-    "hard": ["clip_002", "clip_004", "clip_010", "clip_005", "clip_020"],
+    "hard":   ["clip_001", "clip_002", "clip_003", "clip_004", "clip_005"],
+    "medium": ["clip_006", "clip_007", "clip_008", "clip_009", "clip_010"],
+    "easy":   ["clip_011", "clip_012", "clip_013", "clip_014", "clip_015"],
 }
 
 

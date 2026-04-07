@@ -198,9 +198,17 @@ def _extract_face_stats_fallback(frames: list[np.ndarray], sample_fps: float) ->
     )
 
 
-def _extract_face_stats(frames: list[np.ndarray], sample_fps: float) -> FaceStats:
+def _extract_face_stats(frames: list[np.ndarray], sample_fps: float) -> tuple[FaceStats, list[float]]:
+    """Returns (FaceStats, per_frame_yaws) so callers can compute eye_contact_ratio."""
     if mp is None or not hasattr(mp, "solutions") or not hasattr(mp.solutions, "face_mesh"):
-        return _extract_face_stats_fallback(frames, sample_fps)
+        # Fallback: approximate per-frame yaw from horizontal gradient imbalance.
+        per_frame_yaws: list[float] = []
+        for frame in frames:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            grad_x = np.mean(np.abs(np.diff(gray.astype(np.float32), axis=1)))
+            grad_y = np.mean(np.abs(np.diff(gray.astype(np.float32), axis=0)))
+            per_frame_yaws.append(float(np.clip((grad_x / max(grad_y, 1e-6)) * 8.0, 0.0, 35.0)))
+        return _extract_face_stats_fallback(frames, sample_fps), per_frame_yaws
 
     mp_mesh = mp.solutions.face_mesh
     face_mesh = mp_mesh.FaceMesh(
@@ -216,6 +224,7 @@ def _extract_face_stats(frames: list[np.ndarray], sample_fps: float) -> FaceStat
     pitches: list[float] = []
     mouth_open: list[float] = []
     blink_closures: list[float] = []
+    per_frame_yaws: list[float] = []
     missing_face = 0
 
     # Mouth/eye landmarks from MediaPipe Face Mesh topology.
@@ -259,6 +268,7 @@ def _extract_face_stats(frames: list[np.ndarray], sample_fps: float) -> FaceStat
         yaw = abs((nose.x - (lch.x + rch.x) / 2.0) * 120.0)
         pitch = abs((nose.y - (fh.y + ch.y) / 2.0) * 120.0)
         yaws.append(float(yaw))
+        per_frame_yaws.append(float(yaw))
         pitches.append(float(pitch))
 
         mouth_h = _landmark_distance(lm[mouth_top], lm[mouth_bottom], w, h)
@@ -299,7 +309,7 @@ def _extract_face_stats(frames: list[np.ndarray], sample_fps: float) -> FaceStat
         mouth_open_ratio=float(np.clip(np.mean(mouth_open), 0.0, 1.0)),
         blink_rate_hz=max(0.0, float(blink_rate_hz)),
         occlusion_present=occlusion_present,
-    )
+    ), per_frame_yaws
 
 
 def _motion_score(frames: list[np.ndarray]) -> float:
@@ -313,6 +323,68 @@ def _motion_score(frames: list[np.ndarray]) -> float:
         scores.append(float(np.mean(diff) / 255.0))
         prev = gray
     return float(np.clip(np.mean(scores), 0.0, 1.0))
+
+
+def _sharpness_score(frames: list[np.ndarray]) -> float:
+    """Laplacian variance over the central face ROI (approx top-60% of frame).
+    Higher = sharper. Normalised to [0, 1] via soft-cap at 2000 variance units.
+    """
+    vals = []
+    for frame in frames:
+        h, w = frame.shape[:2]
+        # Face ROI: horizontal centre third, upper 60% of frame.
+        roi = frame[0 : int(0.60 * h), int(0.25 * w) : int(0.75 * w)]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        vals.append(lap_var)
+    mean_var = float(np.mean(vals)) if vals else 0.0
+    return float(np.clip(mean_var / 2000.0, 0.0, 1.0))
+
+
+def _temporal_flicker(frames: list[np.ndarray]) -> float:
+    """Std-dev of per-frame mean brightness, normalised to [0, 1].
+    High values indicate unstable / flickering lighting.
+    """
+    if not frames:
+        return 0.0
+    means = [float(np.mean(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY))) for f in frames]
+    flicker = float(np.std(means))
+    return float(np.clip(flicker / 64.0, 0.0, 1.0))
+
+
+def _bg_entropy(frames: list[np.ndarray]) -> float:
+    """Shannon entropy of a background patch (outer 20% ring of frame).
+    Higher = more complex / busy background.
+    """
+    entropies = []
+    for frame in frames:
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Build background mask: only keep the outer 20% border strip.
+        mask = np.ones((h, w), dtype=np.uint8) * 255
+        mask[int(0.20 * h) : int(0.80 * h), int(0.20 * w) : int(0.80 * w)] = 0
+        pixels = gray[mask == 255].astype(np.float32)
+        if pixels.size == 0:
+            continue
+        hist, _ = np.histogram(pixels, bins=256, range=(0, 256), density=True)
+        hist = hist[hist > 0]
+        entropy = float(-np.sum(hist * np.log2(hist + 1e-12)))
+        entropies.append(entropy)
+    if not entropies:
+        return 0.0
+    # Max theoretical entropy for 256 bins is log2(256)=8; normalise.
+    return float(np.clip(np.mean(entropies) / 8.0, 0.0, 1.0))
+
+
+def _eye_contact_ratio(frames: list[np.ndarray], face_yaws: list[float]) -> float:
+    """Fraction of sampled frames where head yaw < 5 degrees (frontal gaze).
+    Computed from per-frame yaw list produced alongside face stats.
+    Falls back to a single global yaw threshold when per-frame data is unavailable.
+    """
+    if not face_yaws:
+        return 0.0
+    frontal = sum(1 for y in face_yaws if y < 5.0)
+    return float(np.clip(frontal / len(face_yaws), 0.0, 1.0))
 
 
 def _bg_complexity(frames: list[np.ndarray]) -> tuple[str, float]:
@@ -542,10 +614,14 @@ def _extract_clip_metadata(
 ) -> dict[str, Any]:
     probe = _run_ffprobe(video_path)
     frames, _source_fps = _sample_frames(video_path, sample_fps=sample_fps)
-    face = _extract_face_stats(frames, sample_fps=sample_fps)
+    face, per_frame_yaws = _extract_face_stats(frames, sample_fps=sample_fps)
     motion = _motion_score(frames)
     bg_tag, bg_score = _bg_complexity(frames)
     light = _lighting_uniformity(frames)
+    sharpness = _sharpness_score(frames)
+    flicker = _temporal_flicker(frames)
+    entropy = _bg_entropy(frames)
+    eye_contact = _eye_contact_ratio(frames, per_frame_yaws)
 
     wav_path = video_path.with_suffix(".tmp16k.wav")
     _extract_audio_track(video_path, wav_path)
@@ -556,9 +632,12 @@ def _extract_clip_metadata(
         if wav_path.exists():
             wav_path.unlink()
 
+    duration_s = probe["duration_s"]
+    speech_rate_wpm = round((word_count / max(duration_s, 1e-6)) * 60.0, 2) if word_count > 0 else 0.0
+
     row: dict[str, Any] = {
         "clip_id": video_path.stem,
-        "duration_s": probe["duration_s"],
+        "duration_s": duration_s,
         "fps": probe["fps"],
         "resolution": probe["resolution"],
         "face_area_ratio": round(face.area_ratio, 4),
@@ -575,6 +654,13 @@ def _extract_clip_metadata(
         "transcript_confidence": round(float(transcript_conf), 4),
         "lighting_uniformity": round(light, 4),
         "occlusion_present": bool(face.occlusion_present),
+        # ── Option-A enriched features ──────────────────────────────────────
+        "sharpness_score": round(sharpness, 4),
+        "temporal_flicker": round(flicker, 4),
+        "bg_entropy": round(entropy, 4),
+        "eye_contact_ratio": round(eye_contact, 4),
+        "speech_rate_wpm": speech_rate_wpm,
+        # ───────────────────────────────────────────────────────────────────
         "environment_tag": environment_tag_override
         or _environment_tag(
             path_hint=path_hint,
