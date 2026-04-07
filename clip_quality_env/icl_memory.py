@@ -102,8 +102,9 @@ class ICLMemory:
         """
         Build an ICL context block to prepend to the agent's prompt.
 
-        Tells the model what it tried before and what it must do differently.
-        Uses label correctness (not calibrated reward) to grade prior attempts.
+        Shows the agent its prior attempts and their label_score (the raw,
+        band-independent reward component for label correctness).  The agent
+        NEVER sees expected_label — it must improve via trial-and-error.
         """
         attempts = self.records.get(clip_id, [])
         if not attempts:
@@ -112,54 +113,52 @@ class ICLMemory:
         n = len(attempts)
         last = attempts[-1]
         best = self._best_attempt(clip_id)
+        last_ls = float(last.get("label_score", 0.0))
 
         lines: list[str] = [
             f"STRATEGIC CONTEXT — In-Context RL History for clip '{clip_id}':",
             f"  Total prior attempts: {n}",
         ]
 
-        # Show up to last 3 attempts
+        # Show up to last 3 attempts (label + label_score only, NO expected_label)
         for i, att in enumerate(attempts[-3:], start=max(1, n - 2)):
-            correct_tag = (
-                "✓ CORRECT" if att.get("label_correct")
-                else "✗ WRONG" if att.get("expected_label")
-                else "? (no GT)"
-            )
+            ls = float(att.get("label_score", 0.0))
+            if ls >= 0.55:
+                grade_tag = "✓ CORRECT (label_score=0.60)"
+            elif ls >= 0.20:
+                grade_tag = "~ PARTIAL (label_score=0.25, one tier off)"
+            else:
+                grade_tag = "✗ WRONG (label_score=0.00)"
             lines.append(
-                f"  Attempt {i}: label={att['label']}  reward={att['reward']:.3f}  {correct_tag}"
-                + (f"  expected={att['expected_label']}" if att.get("expected_label") and not att.get("label_correct") else "")
+                f"  Attempt {i}: label={att['label']}  reward={att['reward']:.3f}  {grade_tag}"
             )
 
         if best:
+            best_ls = float(best.get("label_score", 0.0))
             lines.append(
-                f"  Best ever: label={best['label']}  reward={best['reward']:.3f}  "
-                + ("✓ correct" if best.get("label_correct") else "✗ wrong")
+                f"  Best ever: label={best['label']}  reward={best['reward']:.3f}  label_score={best_ls:.2f}"
             )
 
-        # Directive based on label correctness (band-independent)
-        last_correct = bool(last.get("label_correct"))
-        last_expected = last.get("expected_label")
-        if not last_correct and last_expected:
+        # Directive based on label_score (reward-only, no answer reveal)
+        if last_ls >= 0.55:
             directive = (
-                f"Your last label was {last['label']} but the expected label is {last_expected}. "
-                f"You MUST predict {last_expected} this time. "
-                f"Then name the two dominant features with directional language to earn the reasoning score."
-            )
-        elif not last_correct:
-            directive = (
-                "Your last prediction appears to be incorrect. "
-                "Carefully re-examine the rubric thresholds and feature values to correct your label."
-            )
-        elif float(last.get("label_score", 0.0)) >= 0.60:
-            directive = (
-                "Good label prediction. Refine reasoning: name both dominant features by their exact "
+                "Your label was CORRECT last time. Keep it. "
+                "Refine reasoning: name both dominant features by their exact "
                 "field name with directional comparisons (above/below threshold). "
                 "Ensure no hallucinated feature names."
             )
+        elif last_ls >= 0.20:
+            directive = (
+                f"Your last label ({last['label']}) was PARTIALLY correct (one tier off). "
+                f"Try a different label this time — you are close but not exact. "
+                f"Then name the two dominant features with directional language."
+            )
         else:
             directive = (
-                "Label is partially correct (borderline). "
-                "Strengthen reasoning by citing dominant features with exact values and threshold comparisons."
+                f"Your last label ({last['label']}) was WRONG. "
+                f"Try a completely different label this time. "
+                f"Re-examine the rubric thresholds and feature values carefully, "
+                f"then name the two dominant features with directional language."
             )
 
         lines.append(f"  DIRECTIVE: {directive}")
@@ -168,33 +167,35 @@ class ICLMemory:
     def get_hint_feedback(self, clip_id: str) -> str:
         """
         Short suffix appended to the quality hint when there is prior history.
-        Uses label correctness (band-independent) instead of calibrated reward.
+
+        Uses label_score ONLY \u2014 never reveals expected_label to the agent.
         """
         attempts = self.records.get(clip_id, [])
         if not attempts:
             return ""
 
         last = attempts[-1]
-        last_correct = bool(last.get("label_correct"))
-        expected = last.get("expected_label") or ""
+        ls = float(last.get("label_score", 0.0))
 
-        parts: list[str] = []
-        if not last_correct and expected:
-            parts.append(
-                f"Previous attempt predicted {last['label']} but expected label is {expected}. "
-                f"Correct your label to {expected} this time."
+        if ls >= 0.55:
+            # Label was correct \u2014 push for reasoning refinement only
+            return (
+                f"Your previous label ({last['label']}) scored well. Keep it. "
+                f"Focus on strengthening reasoning: cite dominant features with "
+                f"exact values and directional comparisons against thresholds."
             )
-        elif not last_correct:
-            parts.append(
-                f"Previous attempt (label={last['label']}, reward={last['reward']:.3f}) appears incorrect. "
-                f"Re-examine rubric thresholds carefully."
+        elif ls >= 0.20:
+            # Partial match \u2014 one tier off
+            return (
+                f"Previous label ({last['label']}) was partially correct (one tier off, "
+                f"label_score={ls:.2f}). Try a different label this time."
             )
-        elif float(last.get("label_score", 0.0)) >= 0.60:
-            parts.append(
-                f"Label was correct last time. Strengthen reasoning by naming dominant features "
-                f"with exact values and directional comparisons against thresholds."
+        else:
+            # Completely wrong
+            return (
+                f"Previous label ({last['label']}) was incorrect (label_score={ls:.2f}). "
+                f"Try a different label. Re-examine rubric thresholds carefully."
             )
-        return " ".join(parts)
 
     # ──────────────────────────────────────────────────
     # Read — analytics / UI

@@ -160,17 +160,23 @@ class ClipQualityAgent:
         self, clip: Dict[str, Any], icl_memory: ICLMemory | None
     ) -> str:
         """
-        Select the best label using per-clip attempt history.
+        Select the best label using **reward-based trial-and-error**.
 
-        THREE-TIER DECISION (band-independent — never uses calibrated reward):
-        1. If we know our last label was WRONG and we know the correct answer,
-           immediately switch to the expected_label.  This is the core RL
-           correction signal — it fires on easy tasks where calibrated rewards
-           are capped at 0.32 and a reward-threshold check would never trigger.
-        2. If any prior attempt was CORRECT (label_correct=True), use that label
-           with higher confidence.
-        3. Otherwise fall back to deterministic heuristic.
+        The agent NEVER sees expected_label.  It learns purely from the raw
+        label_score returned by the grader after each attempt:
+          • label_score = 0.60 → exact match (correct label)
+          • label_score = 0.25 → partial match (one tier off)
+          • label_score = 0.00 → completely wrong
+
+        Strategy:
+        1. If any prior attempt scored 0.60 → use that label (it was correct).
+        2. If all tried labels scored 0.00 → try an untried label.
+        3. If a label scored 0.25 (partial) → it was one tier off; try the
+           remaining untried label.
+        4. No history → deterministic heuristic.
         """
+        ALL_LABELS = ["KEEP", "BORDERLINE", "REJECT"]
+
         if icl_memory is None:
             return self._heuristic_label(clip)
         clip_id = str(clip.get("clip_id", ""))
@@ -178,18 +184,36 @@ class ClipQualityAgent:
         if not attempts:
             return self._heuristic_label(clip)
 
-        last = attempts[-1]
-        # Tier 1: last attempt was wrong AND we know the correct label → correct it
-        if not last.get("label_correct") and last.get("expected_label"):
-            return str(last["expected_label"]).upper()
+        # Build a map: label → best raw label_score achieved
+        label_scores: Dict[str, float] = {}
+        for att in attempts:
+            lbl = str(att.get("label", "")).upper()
+            score = float(att.get("label_score", 0.0))
+            if lbl in ALL_LABELS:
+                label_scores[lbl] = max(label_scores.get(lbl, 0.0), score)
 
-        # Tier 2: find best attempt that was label-correct and carry it forward
-        for att in reversed(attempts):
-            if att.get("label_correct"):
-                return str(att["label"]).upper()
+        # Tier 1: any label scored 0.60 (exact match) → lock it in
+        for lbl, score in label_scores.items():
+            if score >= 0.55:  # 0.60 with small float tolerance
+                return lbl
 
-        # Tier 3: no correctness signal yet → deterministic heuristic
-        return self._heuristic_label(clip)
+        # Tier 2: find labels we haven't tried yet
+        tried = set(label_scores.keys())
+        untried = [lbl for lbl in ALL_LABELS if lbl not in tried]
+
+        # Tier 3: if there's a partial match (0.25), the correct label is
+        # one tier away.  Prefer untried labels, but if all are tried,
+        # pick the one with the best score.
+        if untried:
+            # Preference: heuristic's guess first if it's untried
+            heuristic_guess = self._heuristic_label(clip)
+            if heuristic_guess in untried:
+                return heuristic_guess
+            return untried[0]
+
+        # All 3 labels have been tried — return whichever scored highest
+        best_label = max(label_scores, key=lambda k: label_scores[k])
+        return best_label
 
     # ── Grader-aligned reasoning ───────────────────────────────────────────────
 
@@ -352,9 +376,15 @@ class ClipQualityAgent:
         """
         clip = obs.get("clip_metadata", {})
         if isinstance(clip, dict):
-            clip_dict = clip
+            clip_dict = dict(clip)
         else:
-            clip_dict = clip if isinstance(clip, dict) else {}
+            clip_dict = {}
+
+        # ── CRITICAL: strip expected_label so the agent cannot cheat ──────────
+        # The environment stores expected_label in clip metadata for grading,
+        # but the agent must NEVER see the answer.  It learns from the reward
+        # signal (label_score) only.
+        clip_dict.pop("expected_label", None)
 
         clip_id = str(clip_dict.get("clip_id", ""))
         rubric_summary = obs.get("rubric_summary", "")
@@ -389,18 +419,20 @@ class ClipQualityAgent:
             if isinstance(parsed, dict):
                 return self.normalize_action(parsed, clip_dict)
 
-        # ── Heuristic + RL_reasoning fallback ─────────────────────────────────
+        # ── Heuristic + RL trial-and-error fallback ───────────────────────────
         label = self._memory_guided_label(clip_dict, icl_memory)
         reasoning = self._rl_reasoning(
             clip_dict, dominant_features, label, rubric_thresholds, quality_hint
         )
         confidence = 0.85 if label != "BORDERLINE" else 0.70
 
-        # Boost confidence when memory confirms this is the correct label
+        # Boost confidence when memory shows this label scored well
         if icl_memory is not None:
-            best = icl_memory._best_attempt(clip_id)
-            if best and float(best["reward"]) >= 0.60:
-                confidence = min(confidence + 0.05, 0.95)
+            clip_attempts = icl_memory.records.get(clip_id, [])
+            for att in reversed(clip_attempts):
+                if str(att.get("label", "")).upper() == label and float(att.get("label_score", 0.0)) >= 0.55:
+                    confidence = min(confidence + 0.05, 0.95)
+                    break
 
         return {
             "label": label,
