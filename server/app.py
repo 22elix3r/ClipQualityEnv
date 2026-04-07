@@ -13,6 +13,7 @@ from fastapi import BackgroundTasks, HTTPException
 from openenv.core.env_server import create_fastapi_app
 
 import inference
+from clip_quality_env.icl_memory import ICLMemory
 from models import Action, Observation, TaskInfo
 from server.baseline_runs import baseline_run_tracker
 from server.environment import ClipQualityEnvironment
@@ -381,22 +382,22 @@ def _format_baseline_result_markdown(
     return "\n".join(lines)
 
 
-def _run_baseline_background(run_id: str, task: str | None = None) -> None:
+def _run_baseline_background(run_id: str, task: str | None = None, icl_memory: ICLMemory | None = None) -> None:
     try:
-        raw = inference.run_baseline(task=task)
+        raw = inference.run_baseline(task=task, icl_memory=icl_memory)
         baseline_run_tracker.mark_complete(run_id, _baseline_payload_from_raw(raw))
     except Exception as exc:
         baseline_run_tracker.mark_failed(run_id, {"message": str(exc)})
 
 
-def _start_baseline_ui_run(task: str | None = None) -> tuple[str, str, str, dict[str, Any], dict[str, Any]]:
+def _start_baseline_ui_run(task: str | None = None, icl_memory: ICLMemory | None = None) -> tuple[str, str, str, dict[str, Any], dict[str, Any]]:
     baseline_run_tracker.cleanup_expired()
     run_id = baseline_run_tracker.create_run()
     initial_payload = _initial_baseline_payload(task=task)
     baseline_run_tracker.update_partial(run_id, initial_payload)
     worker = threading.Thread(
         target=_run_baseline_background,
-        args=(run_id, task),
+        args=(run_id, task, icl_memory),
         daemon=True,
         name=f"baseline-ui-{run_id[:8]}",
     )
@@ -635,6 +636,17 @@ def build_custom_ui() -> gr.Blocks:
     def _resolve_env(env_state: ClipQualityEnvironment | None) -> ClipQualityEnvironment:
         return env_state if isinstance(env_state, ClipQualityEnvironment) else ClipQualityEnvironment()
 
+    def _resolve_memory(mem_state: Any) -> ICLMemory:
+        return mem_state if isinstance(mem_state, ICLMemory) else ICLMemory()
+
+    def _learning_progress_df(icl_mem: ICLMemory) -> pd.DataFrame:
+        """Build the Learning Progress DataFrame from session ICL memory."""
+        learning_columns = ["Clip ID", "Runs", "Best Reward", "Latest Reward", "Best Label", "Expected", "Trend"]
+        rows = icl_mem.all_clip_summary()
+        if not rows:
+            return pd.DataFrame(columns=learning_columns)
+        return pd.DataFrame(rows, columns=learning_columns)
+
     def handle_reset(env_state: ClipQualityEnvironment | None, task_id: str):
         env = _resolve_env(env_state)
         obs = env.reset(task_id=task_id).model_dump()
@@ -669,55 +681,84 @@ def build_custom_ui() -> gr.Blocks:
         hard_confidence_justification: str,
         hard_confidence: float,
         clip_id: str,
+        icl_memory_state: Any,
     ):
-        """Execute Strategic Step: auto-generates quality hints then predicts labels for all clips."""
+        """
+        Execute Strategic Step with full ICL-RL loop.
+
+        For each of the 5 episode clips:
+          1. Auto-generate a memory-aware quality hint
+          2. Call agent.act() with ICL context from session memory
+          3. Submit the action to the environment
+          4. Record reward + label to session memory for next-run improvement
+        """
         import copy as _copy
         env = _resolve_env(env_state)
-        if not env._episode_plan or env.state.task_id != task_id:
-            env.reset(task_id=task_id)
+        icl_mem = _resolve_memory(icl_memory_state)
 
-        # Build heuristic agent to predict labels with quality hints
+        # Always reset so we run a clean episode
+        obs = env.reset(task_id=task_id)
+        obs_dict = obs.model_dump()
+
         _agent = inference.ClipQualityAgent(client=None, model=inference.DEFAULT_MODEL_NAME)
 
         predicted_labels: dict[str, str] = {}
-        obs_dict: dict[str, Any] = {}
-        last_obs = None
 
-        # Run through all clips in the episode plan using auto quality hints
         for step_idx in range(len(env._episode_plan)):
-            current_clip = env._episode_plan[env.state.step_count].clip if env.state.step_count < len(env._episode_plan) else env._episode_plan[-1].clip
+            current_clip = (
+                env._episode_plan[env.state.step_count].clip
+                if env.state.step_count < len(env._episode_plan)
+                else env._episode_plan[-1].clip
+            )
             clip_id_val = str(current_clip.get("clip_id", ""))
 
-            # Auto-generate quality hint for this clip
-            hint_text = env.build_quality_hint(clip=_copy.deepcopy(current_clip))
+            # Memory-aware quality hint (appends prior failure feedback)
+            hint_text = env.build_quality_hint(
+                clip=_copy.deepcopy(current_clip),
+                icl_memory=icl_mem,
+            )
 
-            # Predict label using heuristic (with hint-enriched reasoning)
-            predicted = _agent._heuristic_label(current_clip)
-            reasoning = hint_text if hint_text else f"{predicted} based on clip metadata cues for {clip_id_val}."
-            confidence = 0.82 if predicted != "BORDERLINE" else 0.68
-
-            payload: dict[str, Any] = {
-                "label": predicted,
-                "reasoning": reasoning,
-                "confidence": confidence,
-                "clip_id": clip_id_val,
-            }
+            # Full ICL-RL act(): uses memory context + grader-aligned reasoning
+            action_dict = _agent.act(
+                task_id,
+                obs_dict,
+                icl_memory=icl_mem,
+                quality_hint=hint_text,
+            )
+            # Override clip_id override only on first step if provided
             if clip_id and clip_id.strip() and step_idx == 0:
-                payload["clip_id"] = clip_id.strip()
+                action_dict["clip_id"] = clip_id.strip()
+            else:
+                action_dict.setdefault("clip_id", clip_id_val)
 
-            obs_obj = env.step(Action.model_validate(payload))
-            last_obs = obs_obj
+            obs_obj = env.step(Action.model_validate(action_dict))
             obs_dict = obs_obj.model_dump()
-            predicted_labels[clip_id_val] = predicted
+            reward = float(obs_obj.reward)
+
+            # Record to session ICL memory
+            expected = str(current_clip.get("expected_label", "")).upper() or None
+            icl_mem.record(
+                clip_id=clip_id_val,
+                label=action_dict["label"],
+                reward=reward,
+                reasoning=str(action_dict.get("reasoning", "")),
+                expected_label=expected,
+                episode=icl_mem.episode_count,
+                step=step_idx + 1,
+            )
+            predicted_labels[clip_id_val] = action_dict["label"]
 
             if obs_obj.done:
                 break
+
+        icl_mem.increment_episode()
 
         obs = obs_dict
         df, pol, score, steps, ep, stat = format_obs(obs, predicted_labels=predicted_labels)
         dominant_df = format_dominant_features(env.dominant_feature_rows())
         history_df, history_cues, history_total = format_session_history(obs)
         reward_msg = _reward_breakdown_markdown(obs, initialized=False)
+        learning_df = _learning_progress_df(icl_mem)
         return (
             env,
             df,
@@ -732,6 +773,8 @@ def build_custom_ui() -> gr.Blocks:
             history_cues,
             history_total,
             json.dumps(obs, indent=2),
+            icl_mem,
+            learning_df,
         )
 
     def handle_quality_hint(
@@ -741,12 +784,14 @@ def build_custom_ui() -> gr.Blocks:
         easy_observation: str,
         medium_reasoning: str,
         hard_tradeoff_summary: str,
+        icl_memory_state: Any,
     ) -> tuple[ClipQualityEnvironment, str, str, str]:
         env = _resolve_env(env_state)
+        icl_mem = _resolve_memory(icl_memory_state)
         if env.state.task_id != task_id or not env.state.current_clip_id:
             env.reset(task_id=task_id)
 
-        hint_text = env.build_quality_hint()
+        hint_text = env.build_quality_hint(icl_memory=icl_mem)
         active_tab = selected_input_tab if selected_input_tab in {"easy", "medium", "hard"} else _input_tab_for_task(task_id)
 
         next_easy_observation = easy_observation
@@ -808,6 +853,7 @@ def build_custom_ui() -> gr.Blocks:
         """,
     ) as demo:
         env_state = gr.State(value=None)
+        icl_memory_state = gr.State(value=None)   # per-session ICLMemory
         baseline_run_id_state = gr.State(value=None)
         selected_tab_state = gr.State(value="easy")
         baseline_poll_timer = gr.Timer(value=1.0, active=False)
@@ -869,6 +915,19 @@ def build_custom_ui() -> gr.Blocks:
                     interactive=False,
                     visible=False
                 )
+
+        gr.Markdown("---")
+        with gr.Accordion("📈 ICL Learning Progress", open=False):
+            gr.Markdown(
+                "_Per-clip reward history accumulated in this session. "
+                "Each time you run Execute Strategic Step or the Baseline Agent, "
+                "predictions are recorded and the agent learns from prior rewards._"
+            )
+            learning_progress_table = gr.DataFrame(
+                label="Session Learning History",
+                headers=["Clip ID", "Runs", "Best Reward", "Latest Reward", "Best Label", "Expected", "Trend"],
+                interactive=False,
+            )
 
         gr.Markdown("---")
         gr.Markdown("### Propose Strategic Refinement")
@@ -948,6 +1007,7 @@ def build_custom_ui() -> gr.Blocks:
                 hard_confidence_justification_input,
                 hard_confidence_input,
                 clip_id_input,
+                icl_memory_state,
             ],
             outputs=[
                 env_state,
@@ -963,6 +1023,8 @@ def build_custom_ui() -> gr.Blocks:
                 session_history_cues,
                 session_total_reward,
                 raw_json_box,
+                icl_memory_state,
+                learning_progress_table,
             ],
         )
         hint_btn.click(
@@ -974,6 +1036,7 @@ def build_custom_ui() -> gr.Blocks:
                 easy_observation_input,
                 medium_reasoning_input,
                 hard_tradeoff_summary_input,
+                icl_memory_state,
             ],
             outputs=[
                 env_state,
@@ -982,17 +1045,20 @@ def build_custom_ui() -> gr.Blocks:
                 hard_tradeoff_summary_input,
             ],
         )
-        def _start_baseline_with_corpus(task_id_val: str, env_st: ClipQualityEnvironment | None):
-            run_id, status_md, result_md, btn_upd, timer_upd = _start_baseline_ui_run(task_id_val)
-            return run_id, status_md, result_md, btn_upd, timer_upd, env_st, gr.update()
+        def _start_baseline_with_corpus(task_id_val: str, env_st: ClipQualityEnvironment | None, icl_mem_st: Any):
+            icl_mem = _resolve_memory(icl_mem_st)
+            run_id, status_md, result_md, btn_upd, timer_upd = _start_baseline_ui_run(task_id_val, icl_mem)
+            return run_id, status_md, result_md, btn_upd, timer_upd, env_st, gr.update(), icl_mem
 
         def _poll_baseline_with_corpus(
             run_id: str | None,
             env_st: ClipQualityEnvironment | None,
             current_corpus_df: pd.DataFrame | None,
+            icl_mem_st: Any,
         ):
+            icl_mem = _resolve_memory(icl_mem_st)
             run_id_out, status_md, result_md, btn_upd, timer_upd = _poll_baseline_ui_run(run_id)
-            # When complete, compute predicted labels and update corpus table
+            # When complete, compute predicted labels and update corpus + learning tables
             if run_id_out is None and env_st is not None:
                 payload: dict[str, Any] = {}
                 if run_id:
@@ -1009,18 +1075,20 @@ def build_custom_ui() -> gr.Blocks:
                         cid = str(row.get("Clip ID", ""))
                         if cid in pred_labels:
                             df_upd.at[idx, "Predicted Label"] = pred_labels[cid]
-                    return run_id_out, status_md, result_md, btn_upd, timer_upd, env_st, gr.update(value=df_upd)
-            return run_id_out, status_md, result_md, btn_upd, timer_upd, env_st, gr.update()
+                    learning_df = _learning_progress_df(icl_mem)
+                    return run_id_out, status_md, result_md, btn_upd, timer_upd, env_st, gr.update(value=df_upd), icl_mem, learning_df
+            learning_df = _learning_progress_df(icl_mem)
+            return run_id_out, status_md, result_md, btn_upd, timer_upd, env_st, gr.update(), icl_mem, learning_df
 
         baseline_run_btn.click(
             _start_baseline_with_corpus,
-            inputs=[task_id, env_state],
-            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer, env_state, corpus_table],
+            inputs=[task_id, env_state, icl_memory_state],
+            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer, env_state, corpus_table, icl_memory_state],
         )
         baseline_poll_timer.tick(
             _poll_baseline_with_corpus,
-            inputs=[baseline_run_id_state, env_state, corpus_table],
-            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer, env_state, corpus_table],
+            inputs=[baseline_run_id_state, env_state, corpus_table, icl_memory_state],
+            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer, env_state, corpus_table, icl_memory_state, learning_progress_table],
         )
 
     return demo
