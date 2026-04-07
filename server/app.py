@@ -641,7 +641,7 @@ def build_custom_ui() -> gr.Blocks:
 
     def _learning_progress_df(icl_mem: ICLMemory) -> pd.DataFrame:
         """Build the Learning Progress DataFrame from session ICL memory."""
-        learning_columns = ["Clip ID", "Runs", "Best Reward", "Latest Reward", "Best Label", "Expected", "Trend"]
+        learning_columns = ["Clip ID", "Runs", "Correct/Total", "Best Reward", "Latest Reward", "Best Label", "Expected", "Trend"]
         rows = icl_mem.all_clip_summary()
         if not rows:
             return pd.DataFrame(columns=learning_columns)
@@ -735,8 +735,12 @@ def build_custom_ui() -> gr.Blocks:
             obs_dict = obs_obj.model_dump()
             reward = float(obs_obj.reward)
 
-            # Record to session ICL memory
+            # Record to session ICL memory (use raw label_score, NOT calibrated reward)
+            # Raw label_score is band-independent: easy tasks cap calibrated reward at 0.32,
+            # so a threshold on calibrated reward would never fire. label_score is always
+            # 0.0 (wrong), 0.25 (close), or 0.60 (correct) regardless of difficulty.
             expected = str(current_clip.get("expected_label", "")).upper() or None
+            raw_label_score = float(obs_obj.info.get("label_score", 0.0))
             icl_mem.record(
                 clip_id=clip_id_val,
                 label=action_dict["label"],
@@ -745,6 +749,7 @@ def build_custom_ui() -> gr.Blocks:
                 expected_label=expected,
                 episode=icl_mem.episode_count,
                 step=step_idx + 1,
+                label_score=raw_label_score,
             )
             predicted_labels[clip_id_val] = action_dict["label"]
 
@@ -925,7 +930,7 @@ def build_custom_ui() -> gr.Blocks:
             )
             learning_progress_table = gr.DataFrame(
                 label="Session Learning History",
-                headers=["Clip ID", "Runs", "Best Reward", "Latest Reward", "Best Label", "Expected", "Trend"],
+                headers=["Clip ID", "Runs", "Correct/Total", "Best Reward", "Latest Reward", "Best Label", "Expected", "Trend"],
                 interactive=False,
             )
 

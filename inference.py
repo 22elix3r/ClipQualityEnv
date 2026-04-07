@@ -160,16 +160,35 @@ class ClipQualityAgent:
         self, clip: Dict[str, Any], icl_memory: ICLMemory | None
     ) -> str:
         """
-        Use the best past label for this clip if it earned a good reward;
-        otherwise fall back to heuristic.
+        Select the best label using per-clip attempt history.
+
+        THREE-TIER DECISION (band-independent — never uses calibrated reward):
+        1. If we know our last label was WRONG and we know the correct answer,
+           immediately switch to the expected_label.  This is the core RL
+           correction signal — it fires on easy tasks where calibrated rewards
+           are capped at 0.32 and a reward-threshold check would never trigger.
+        2. If any prior attempt was CORRECT (label_correct=True), use that label
+           with higher confidence.
+        3. Otherwise fall back to deterministic heuristic.
         """
         if icl_memory is None:
             return self._heuristic_label(clip)
         clip_id = str(clip.get("clip_id", ""))
-        best = icl_memory._best_attempt(clip_id)
-        if best and float(best["reward"]) >= 0.50:
-            # Carry forward the best label if it scored well
-            return str(best["label"]).upper()
+        attempts = icl_memory.records.get(clip_id, [])
+        if not attempts:
+            return self._heuristic_label(clip)
+
+        last = attempts[-1]
+        # Tier 1: last attempt was wrong AND we know the correct label → correct it
+        if not last.get("label_correct") and last.get("expected_label"):
+            return str(last["expected_label"]).upper()
+
+        # Tier 2: find best attempt that was label-correct and carry it forward
+        for att in reversed(attempts):
+            if att.get("label_correct"):
+                return str(att["label"]).upper()
+
+        # Tier 3: no correctness signal yet → deterministic heuristic
         return self._heuristic_label(clip)
 
     # ── Grader-aligned reasoning ───────────────────────────────────────────────
@@ -446,6 +465,7 @@ def run_episode(
 
         # Write to ICL memory so next step can learn from this reward
         expected = str(current_clip.get("expected_label", "")).upper() or None
+        raw_label_score = float(obs.info.get("label_score", 0.0))
         icl_memory.record(
             clip_id=clip_id_val,
             label=action_name,
@@ -454,6 +474,7 @@ def run_episode(
             expected_label=expected,
             episode=icl_memory.episode_count,
             step=step_num,
+            label_score=raw_label_score,
         )
 
         print(

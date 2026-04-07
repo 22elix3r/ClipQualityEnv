@@ -57,16 +57,30 @@ class ICLMemory:
         expected_label: str | None,
         episode: int,
         step: int,
+        label_score: float = 0.0,
     ) -> None:
-        """Append one prediction attempt to the clip's history."""
+        """Append one prediction attempt to the clip's history.
+
+        label_score is the RAW (uncalibrated) label component from the grader
+        (0.0, 0.25, or 0.60), NOT the difficulty-band-calibrated total reward.
+        This is critical: calibrated rewards are band-capped per difficulty, so
+        the 0.50 threshold would be unreachable on easy tasks even with a
+        perfect prediction.  Storing the raw label_score lets us make
+        band-independent decisions about label correctness.
+        """
         if clip_id not in self.records:
             self.records[clip_id] = []
+        label_upper = str(label).upper()
+        exp_upper = str(expected_label or "").upper() or None
+        label_correct = bool(exp_upper and label_upper == exp_upper)
         self.records[clip_id].append(
             {
-                "label": str(label).upper(),
+                "label": label_upper,
                 "reward": float(reward),
+                "label_score": float(label_score),
+                "label_correct": label_correct,
                 "reasoning": str(reasoning),
-                "expected_label": str(expected_label or "").upper() or None,
+                "expected_label": exp_upper,
                 "episode": int(episode),
                 "step": int(step),
             }
@@ -88,8 +102,8 @@ class ICLMemory:
         """
         Build an ICL context block to prepend to the agent's prompt.
 
-        Tells the model what it tried before and what it must do differently,
-        mirroring the "Contextual Gradient" from the reference architecture.
+        Tells the model what it tried before and what it must do differently.
+        Uses label correctness (not calibrated reward) to grade prior attempts.
         """
         attempts = self.records.get(clip_id, [])
         if not attempts:
@@ -106,51 +120,46 @@ class ICLMemory:
 
         # Show up to last 3 attempts
         for i, att in enumerate(attempts[-3:], start=max(1, n - 2)):
-            expected = att.get("expected_label") or "unknown"
-            match_tag = (
-                "✓ CORRECT"
-                if att["label"] == expected and expected != "unknown"
-                else "✗ WRONG"
-                if expected != "unknown"
+            correct_tag = (
+                "✓ CORRECT" if att.get("label_correct")
+                else "✗ WRONG" if att.get("expected_label")
                 else "? (no GT)"
             )
             lines.append(
-                f"  Attempt {i}: label={att['label']}  reward={att['reward']:.3f}  {match_tag}"
+                f"  Attempt {i}: label={att['label']}  reward={att['reward']:.3f}  {correct_tag}"
+                + (f"  expected={att['expected_label']}" if att.get("expected_label") and not att.get("label_correct") else "")
             )
 
         if best:
             lines.append(
-                f"  Best ever: label={best['label']}  reward={best['reward']:.3f}"
+                f"  Best ever: label={best['label']}  reward={best['reward']:.3f}  "
+                + ("✓ correct" if best.get("label_correct") else "✗ wrong")
             )
 
-        # Improvement directive based on last reward band
-        r = float(last["reward"])
-        if r < 0.20:
+        # Directive based on label correctness (band-independent)
+        last_correct = bool(last.get("label_correct"))
+        last_expected = last.get("expected_label")
+        if not last_correct and last_expected:
             directive = (
-                "Your last prediction was very poor. "
-                "Study the rubric thresholds carefully. "
-                "Correct the label first, then name at least two dominant features "
-                "with explicit directional language (e.g. 'above the KEEP threshold', "
-                "'below the REJECT boundary')."
+                f"Your last label was {last['label']} but the expected label is {last_expected}. "
+                f"You MUST predict {last_expected} this time. "
+                f"Then name the two dominant features with directional language to earn the reasoning score."
             )
-        elif r < 0.50:
+        elif not last_correct:
             directive = (
-                "Moderate result. Your label may be wrong or reasoning too vague. "
-                "Reference the two dominant features by name with their exact values "
-                "and compare them against the rubric thresholds using words like "
-                "'above', 'below', 'stable', 'high', 'low'."
+                "Your last prediction appears to be incorrect. "
+                "Carefully re-examine the rubric thresholds and feature values to correct your label."
             )
-        elif r < 0.75:
+        elif float(last.get("label_score", 0.0)) >= 0.60:
             directive = (
-                "Good result. Refine by ensuring both dominant features appear in "
-                "reasoning with directional cues and no hallucinated feature names. "
-                "Use only field names that exist in the clip metadata."
+                "Good label prediction. Refine reasoning: name both dominant features by their exact "
+                "field name with directional comparisons (above/below threshold). "
+                "Ensure no hallucinated feature names."
             )
         else:
             directive = (
-                "Strong result. Maintain precision. "
-                "Continue naming dominant features with directional cues and "
-                "ensure confidence reflects your certainty (>= 0.80 for clear cases)."
+                "Label is partially correct (borderline). "
+                "Strengthen reasoning by citing dominant features with exact values and threshold comparisons."
             )
 
         lines.append(f"  DIRECTIVE: {directive}")
@@ -159,28 +168,31 @@ class ICLMemory:
     def get_hint_feedback(self, clip_id: str) -> str:
         """
         Short suffix appended to the quality hint when there is prior history.
-        Tells the agent concretely what went wrong so it can self-correct.
+        Uses label correctness (band-independent) instead of calibrated reward.
         """
         attempts = self.records.get(clip_id, [])
         if not attempts:
             return ""
 
         last = attempts[-1]
-        r = float(last["reward"])
+        last_correct = bool(last.get("label_correct"))
         expected = last.get("expected_label") or ""
-        wrong_label = last["label"] != expected if expected else False
 
         parts: list[str] = []
-        if wrong_label and expected:
+        if not last_correct and expected:
             parts.append(
                 f"Previous attempt predicted {last['label']} but expected label is {expected}. "
-                f"Correct your label this time."
+                f"Correct your label to {expected} this time."
             )
-        if r < 0.50:
+        elif not last_correct:
             parts.append(
-                f"Prior reward was only {r:.3f}. "
-                f"Strengthen reasoning by naming dominant features with values and "
-                f"comparing explicitly against rubric thresholds."
+                f"Previous attempt (label={last['label']}, reward={last['reward']:.3f}) appears incorrect. "
+                f"Re-examine rubric thresholds carefully."
+            )
+        elif float(last.get("label_score", 0.0)) >= 0.60:
+            parts.append(
+                f"Label was correct last time. Strengthen reasoning by naming dominant features "
+                f"with exact values and directional comparisons against thresholds."
             )
         return " ".join(parts)
 
@@ -219,10 +231,15 @@ class ICLMemory:
             else:
                 trend = "— First run"
 
+            # Check label correctness trend
+            correct_count = sum(1 for a in attempts if a.get("label_correct"))
+            match_ratio = f"{correct_count}/{len(attempts)}"
+
             rows.append(
                 {
                     "Clip ID": clip_id,
                     "Runs": len(attempts),
+                    "Correct/Total": match_ratio,
                     "Best Reward": round(max(rewards), 3),
                     "Latest Reward": round(last["reward"], 3),
                     "Best Label": best["label"] if best else "—",
