@@ -13,7 +13,6 @@ from fastapi import BackgroundTasks, HTTPException
 from openenv.core.env_server import create_fastapi_app
 
 import inference
-from clip_quality_env.icl_memory import ICLMemory
 from models import Action, Observation, TaskInfo
 from server.baseline_runs import baseline_run_tracker
 from server.environment import ClipQualityEnvironment
@@ -382,22 +381,22 @@ def _format_baseline_result_markdown(
     return "\n".join(lines)
 
 
-def _run_baseline_background(run_id: str, task: str | None = None, icl_memory: ICLMemory | None = None) -> None:
+def _run_baseline_background(run_id: str, task: str | None = None) -> None:
     try:
-        raw = inference.run_baseline(task=task, icl_memory=icl_memory)
+        raw = inference.run_baseline(task=task)
         baseline_run_tracker.mark_complete(run_id, _baseline_payload_from_raw(raw))
     except Exception as exc:
         baseline_run_tracker.mark_failed(run_id, {"message": str(exc)})
 
 
-def _start_baseline_ui_run(task: str | None = None, icl_memory: ICLMemory | None = None) -> tuple[str, str, str, dict[str, Any], dict[str, Any]]:
+def _start_baseline_ui_run(task: str | None = None) -> tuple[str, str, str, dict[str, Any], dict[str, Any]]:
     baseline_run_tracker.cleanup_expired()
     run_id = baseline_run_tracker.create_run()
     initial_payload = _initial_baseline_payload(task=task)
     baseline_run_tracker.update_partial(run_id, initial_payload)
     worker = threading.Thread(
         target=_run_baseline_background,
-        args=(run_id, task, icl_memory),
+        args=(run_id, task),
         daemon=True,
         name=f"baseline-ui-{run_id[:8]}",
     )
@@ -518,17 +517,16 @@ def build_custom_ui() -> gr.Blocks:
         "Threshold Range",
     ]
     session_history_columns = ["Step", "Clip ID", "Submitted Label", "Expected Label", "Reward"]
-    corpus_columns = ["Clip ID", "Expected Label", "Predicted Label", "Current Review Status", "Face Confidence", "Motion Score", "Audio SNR (dB)"]
 
     def format_dominant_features(rows: list[dict[str, Any]]) -> pd.DataFrame:
         if not rows:
             return pd.DataFrame(columns=dominant_feature_columns)
         return pd.DataFrame(rows, columns=dominant_feature_columns)
 
-    def format_obs(obs: dict[str, Any], predicted_labels: dict[str, str] | None = None) -> tuple[pd.DataFrame, str, float, int, str, str]:
+    def format_obs(obs: dict[str, Any]) -> tuple[pd.DataFrame, str, float, int, str, str]:
         if not obs:
             return (
-                pd.DataFrame(columns=corpus_columns),
+                pd.DataFrame(columns=["Clip ID", "Expected Label", "Current Review Status", "Face Confidence", "Motion Score", "Audio SNR (dB)"]),
                 "### No Clip-Quality Rubric Available",
                 0.0,
                 5,
@@ -538,23 +536,22 @@ def build_custom_ui() -> gr.Blocks:
 
         corpus_items = list(obs.get("data_corpus", []))
         corpus_items.sort(key=lambda item: str(item.get("clip_id", item.get("id", ""))))
-        _predicted = predicted_labels or {}
 
         corpus_data = []
         for item in corpus_items:
-            cid = item.get("clip_id", item.get("id", "N/A"))
             corpus_data.append(
                 {
-                    "Clip ID": cid,
+                    "Clip ID": item.get("clip_id", item.get("id", "N/A")),
                     "Expected Label": item.get("expected_label", "N/A"),
-                    "Predicted Label": _predicted.get(str(cid), "—"),
                     "Current Review Status": item.get("review_status", "pending"),
                     "Face Confidence": item.get("face_confidence", "N/A"),
                     "Motion Score": item.get("motion_score", "N/A"),
                     "Audio SNR (dB)": item.get("audio_snr_db", "N/A"),
                 }
             )
-        df_corpus = pd.DataFrame(corpus_data) if corpus_data else pd.DataFrame(columns=corpus_columns)
+        df_corpus = pd.DataFrame(corpus_data) if corpus_data else pd.DataFrame(
+            columns=["Clip ID", "Expected Label", "Current Review Status", "Face Confidence", "Motion Score", "Audio SNR (dB)"]
+        )
 
         rubric_summary = obs.get("rubric_summary", "").strip()
         rule_md = "### Active Clip-Quality Rubric\n"
@@ -570,23 +567,6 @@ def build_custom_ui() -> gr.Blocks:
         total = int(obs.get("corpus_size", len(corpus_data)))
         corpus_stat = f"### Clip Queue: **{shown}** of **{total}** items displayed"
         return df_corpus, rule_md, best_score, steps_left, episode_id, corpus_stat
-
-    def _extract_baseline_predicted_labels(payload: dict[str, Any]) -> dict[str, str]:
-        """Extract per-clip predicted labels from baseline result detail."""
-        labels: dict[str, str] = {}
-        raw_results = payload.get("baseline_results") or []
-        # baseline_results may contain per-task detail including steps
-        # Each result item has task_id, and the episode ran EPISODE_STEPS steps.
-        # We store predicted labels from action_history where available.
-        for result in raw_results:
-            if not isinstance(result, dict):
-                continue
-            # action_history stores the string labels in step order
-            action_history = result.get("action_history") or []
-            task_label = str(result.get("task_id", ""))
-            for idx, lbl in enumerate(action_history):
-                labels[f"{task_label}:step{idx+1}"] = str(lbl).upper()
-        return labels
 
     def format_session_history(obs: dict[str, Any]) -> tuple[pd.DataFrame, str, str]:
         info = obs.get("info", {}) if isinstance(obs, dict) else {}
@@ -636,17 +616,6 @@ def build_custom_ui() -> gr.Blocks:
     def _resolve_env(env_state: ClipQualityEnvironment | None) -> ClipQualityEnvironment:
         return env_state if isinstance(env_state, ClipQualityEnvironment) else ClipQualityEnvironment()
 
-    def _resolve_memory(mem_state: Any) -> ICLMemory:
-        return mem_state if isinstance(mem_state, ICLMemory) else ICLMemory()
-
-    def _learning_progress_df(icl_mem: ICLMemory) -> pd.DataFrame:
-        """Build the Learning Progress DataFrame from session ICL memory."""
-        learning_columns = ["Clip ID", "Runs", "Correct/Total", "Best Reward", "Latest Reward", "Best Label", "Expected", "Trend"]
-        rows = icl_mem.all_clip_summary()
-        if not rows:
-            return pd.DataFrame(columns=learning_columns)
-        return pd.DataFrame(rows, columns=learning_columns)
-
     def handle_reset(env_state: ClipQualityEnvironment | None, task_id: str):
         env = _resolve_env(env_state)
         obs = env.reset(task_id=task_id).model_dump()
@@ -673,97 +642,50 @@ def build_custom_ui() -> gr.Blocks:
     def handle_step(
         env_state: ClipQualityEnvironment | None,
         task_id: str,
+        selected_input_tab: str,
+        easy_label: str,
         easy_observation: str,
+        medium_label: str,
         medium_primary_signal: str,
         medium_conflicting_signal: str,
         medium_reasoning: str,
+        hard_label: str,
         hard_tradeoff_summary: str,
         hard_confidence_justification: str,
         hard_confidence: float,
         clip_id: str,
-        icl_memory_state: Any,
     ):
-        """
-        Execute Strategic Step with full ICL-RL loop.
-
-        For each of the 5 episode clips:
-          1. Auto-generate a memory-aware quality hint
-          2. Call agent.act() with ICL context from session memory
-          3. Submit the action to the environment
-          4. Record reward + label to session memory for next-run improvement
-        """
-        import copy as _copy
         env = _resolve_env(env_state)
-        icl_mem = _resolve_memory(icl_memory_state)
+        if env.state.task_id != task_id:
+            env.reset(task_id=task_id)
+        label, reasoning, confidence = _resolve_tiered_submission(
+            task_id=task_id,
+            selected_input_tab=selected_input_tab,
+            easy_label=easy_label,
+            easy_observation=easy_observation,
+            medium_label=medium_label,
+            medium_primary_signal=medium_primary_signal,
+            medium_conflicting_signal=medium_conflicting_signal,
+            medium_reasoning=medium_reasoning,
+            hard_label=hard_label,
+            hard_tradeoff_summary=hard_tradeoff_summary,
+            hard_confidence_justification=hard_confidence_justification,
+            hard_confidence=hard_confidence,
+        )
+        payload: dict[str, Any] = {
+            "label": label,
+            "reasoning": reasoning,
+            "confidence": confidence,
+        }
+        if clip_id and clip_id.strip():
+            payload["clip_id"] = clip_id.strip()
 
-        # Always reset so we run a clean episode
-        obs = env.reset(task_id=task_id)
-        obs_dict = obs.model_dump()
-
-        _agent = inference.ClipQualityAgent(client=None, model=inference.DEFAULT_MODEL_NAME)
-
-        predicted_labels: dict[str, str] = {}
-
-        for step_idx in range(len(env._episode_plan)):
-            current_clip = (
-                env._episode_plan[env.state.step_count].clip
-                if env.state.step_count < len(env._episode_plan)
-                else env._episode_plan[-1].clip
-            )
-            clip_id_val = str(current_clip.get("clip_id", ""))
-
-            # Memory-aware quality hint (appends prior failure feedback)
-            hint_text = env.build_quality_hint(
-                clip=_copy.deepcopy(current_clip),
-                icl_memory=icl_mem,
-            )
-
-            # Full ICL-RL act(): uses memory context + grader-aligned reasoning
-            action_dict = _agent.act(
-                task_id,
-                obs_dict,
-                icl_memory=icl_mem,
-                quality_hint=hint_text,
-            )
-            # Override clip_id override only on first step if provided
-            if clip_id and clip_id.strip() and step_idx == 0:
-                action_dict["clip_id"] = clip_id.strip()
-            else:
-                action_dict.setdefault("clip_id", clip_id_val)
-
-            obs_obj = env.step(Action.model_validate(action_dict))
-            obs_dict = obs_obj.model_dump()
-            reward = float(obs_obj.reward)
-
-            # Record to session ICL memory (use raw label_score, NOT calibrated reward)
-            # Raw label_score is band-independent: easy tasks cap calibrated reward at 0.32,
-            # so a threshold on calibrated reward would never fire. label_score is always
-            # 0.0 (wrong), 0.25 (close), or 0.60 (correct) regardless of difficulty.
-            expected = str(current_clip.get("expected_label", "")).upper() or None
-            raw_label_score = float(obs_obj.info.get("label_score", 0.0))
-            icl_mem.record(
-                clip_id=clip_id_val,
-                label=action_dict["label"],
-                reward=reward,
-                reasoning=str(action_dict.get("reasoning", "")),
-                expected_label=expected,
-                episode=icl_mem.episode_count,
-                step=step_idx + 1,
-                label_score=raw_label_score,
-            )
-            predicted_labels[clip_id_val] = action_dict["label"]
-
-            if obs_obj.done:
-                break
-
-        icl_mem.increment_episode()
-
-        obs = obs_dict
-        df, pol, score, steps, ep, stat = format_obs(obs, predicted_labels=predicted_labels)
+        obs_obj = env.step(Action.model_validate(payload))
+        obs = obs_obj.model_dump()
+        df, pol, score, steps, ep, stat = format_obs(obs)
         dominant_df = format_dominant_features(env.dominant_feature_rows())
         history_df, history_cues, history_total = format_session_history(obs)
         reward_msg = _reward_breakdown_markdown(obs, initialized=False)
-        learning_df = _learning_progress_df(icl_mem)
         return (
             env,
             df,
@@ -778,8 +700,6 @@ def build_custom_ui() -> gr.Blocks:
             history_cues,
             history_total,
             json.dumps(obs, indent=2),
-            icl_mem,
-            learning_df,
         )
 
     def handle_quality_hint(
@@ -789,14 +709,12 @@ def build_custom_ui() -> gr.Blocks:
         easy_observation: str,
         medium_reasoning: str,
         hard_tradeoff_summary: str,
-        icl_memory_state: Any,
     ) -> tuple[ClipQualityEnvironment, str, str, str]:
         env = _resolve_env(env_state)
-        icl_mem = _resolve_memory(icl_memory_state)
         if env.state.task_id != task_id or not env.state.current_clip_id:
             env.reset(task_id=task_id)
 
-        hint_text = env.build_quality_hint(icl_memory=icl_mem)
+        hint_text = env.build_quality_hint()
         active_tab = selected_input_tab if selected_input_tab in {"easy", "medium", "hard"} else _input_tab_for_task(task_id)
 
         next_easy_observation = easy_observation
@@ -811,40 +729,6 @@ def build_custom_ui() -> gr.Blocks:
 
         return env, next_easy_observation, next_medium_reasoning, next_hard_tradeoff_summary
 
-    def _baseline_predicted_labels_from_payload(payload: dict[str, Any], env: ClipQualityEnvironment | None) -> dict[str, str]:
-        """Build per clip_id predicted-label map from baseline result using clip_ids returned by run_episode."""
-        labels: dict[str, str] = {}
-        if env is None:
-            return labels
-        raw_results = (payload or {}).get("baseline_results") or []
-        for result in raw_results:
-            if not isinstance(result, dict):
-                continue
-            task_id_r = str(result.get("task_id", ""))
-            action_history = result.get("action_history") or []
-            clip_ids_list = result.get("clip_ids") or []
-            if clip_ids_list and action_history:
-                # Preferred: clip IDs returned directly from run_episode
-                for cid, lbl in zip(clip_ids_list, action_history):
-                    labels[str(cid)] = str(lbl).upper()
-            else:
-                # Fallback: match by corpus ordering
-                corpus = env._episode_corpus.get(task_id_r, [])
-                for idx, item in enumerate(corpus):
-                    clip_id_val = str(item.get("clip_id", item.get("id", "")))
-                    if idx < len(action_history):
-                        labels[clip_id_val] = str(action_history[idx]).upper()
-                    else:
-                        _agent = inference.ClipQualityAgent(client=None, model=inference.DEFAULT_MODEL_NAME)
-                        labels[clip_id_val] = _agent._heuristic_label(item)
-        # If no labels resolved, fall back to heuristic on all episode plan clips
-        if not labels and env._episode_plan:
-            _agent = inference.ClipQualityAgent(client=None, model=inference.DEFAULT_MODEL_NAME)
-            for ep_clip in env._episode_plan:
-                cid = str(ep_clip.clip.get("clip_id", ""))
-                labels[cid] = _agent._heuristic_label(ep_clip.clip)
-        return labels
-
     with gr.Blocks(
         title="CLIP Quality Analyzer: Judge's Console",
         theme=gr.themes.Soft(
@@ -858,7 +742,6 @@ def build_custom_ui() -> gr.Blocks:
         """,
     ) as demo:
         env_state = gr.State(value=None)
-        icl_memory_state = gr.State(value=None)   # per-session ICLMemory
         baseline_run_id_state = gr.State(value=None)
         selected_tab_state = gr.State(value="easy")
         baseline_poll_timer = gr.Timer(value=1.0, active=False)
@@ -922,34 +805,32 @@ def build_custom_ui() -> gr.Blocks:
                 )
 
         gr.Markdown("---")
-        with gr.Accordion("📈 ICL Learning Progress", open=False):
-            gr.Markdown(
-                "_Per-clip reward history accumulated in this session. "
-                "Each time you run Execute Strategic Step or the Baseline Agent, "
-                "predictions are recorded and the agent learns from prior rewards._"
-            )
-            learning_progress_table = gr.DataFrame(
-                label="Session Learning History",
-                headers=["Clip ID", "Runs", "Correct/Total", "Best Reward", "Latest Reward", "Best Label", "Expected", "Trend"],
-                interactive=False,
-            )
-
-        gr.Markdown("---")
         gr.Markdown("### Propose Strategic Refinement")
-        gr.Markdown(
-            "_Click **Execute Strategic Step** to auto-generate quality hints for all clips and predict labels automatically. "
-            "Use **Load Quality Hint** (optional) to manually preview the hint for the current clip before running._"
-        )
         with gr.Group():
             with gr.Tabs(selected="easy") as tiered_input_tabs:
                 with gr.Tab("Easy: Definition Refining", id="easy"):
-                    easy_observation_input = gr.Textbox(label="Key Observation (auto-filled by quality hint)", lines=2, placeholder="Auto-generated or manually entered hint for the current clip.")
+                    easy_label_input = gr.Radio(
+                        choices=CLASS_LABEL_CHOICES,
+                        value="BORDERLINE",
+                        label="Predicted Label",
+                    )
+                    easy_observation_input = gr.Textbox(label="Key Observation", lines=2)
                 with gr.Tab("Medium: Gap Detection", id="medium"):
+                    medium_label_input = gr.Radio(
+                        choices=CLASS_LABEL_CHOICES,
+                        value="BORDERLINE",
+                        label="Predicted Label",
+                    )
                     medium_primary_signal_input = gr.Textbox(label="Primary Signal", lines=1)
                     medium_conflicting_signal_input = gr.Textbox(label="Conflicting Signal", lines=1)
-                    medium_reasoning_input = gr.TextArea(label="Reasoning (auto-filled by quality hint)", lines=4, placeholder="Auto-generated or manually entered reasoning.")
+                    medium_reasoning_input = gr.TextArea(label="Reasoning", lines=4)
                 with gr.Tab("Hard: Full System Evolution", id="hard"):
-                    hard_tradeoff_summary_input = gr.TextArea(label="Trade-off Summary (auto-filled by quality hint)", lines=4, placeholder="Auto-generated or manually entered trade-off summary.")
+                    hard_label_input = gr.Radio(
+                        choices=CLASS_LABEL_CHOICES,
+                        value="BORDERLINE",
+                        label="Predicted Label",
+                    )
+                    hard_tradeoff_summary_input = gr.TextArea(label="Trade-off Summary", lines=4)
                     with gr.Row():
                         hard_confidence_justification_input = gr.TextArea(label="Confidence Justification", lines=3, scale=2)
                         hard_confidence_input = gr.Slider(
@@ -960,7 +841,7 @@ def build_custom_ui() -> gr.Blocks:
                             label="Confidence",
                             scale=1
                         )
-
+            
             clip_id_input = gr.Textbox(label="Clip ID override (optional)")
             hint_btn = gr.Button(QUALITY_HINT_BUTTON_LABEL, variant="secondary")
 
@@ -1004,15 +885,18 @@ def build_custom_ui() -> gr.Blocks:
             inputs=[
                 env_state,
                 task_id,
+                selected_tab_state,
+                easy_label_input,
                 easy_observation_input,
+                medium_label_input,
                 medium_primary_signal_input,
                 medium_conflicting_signal_input,
                 medium_reasoning_input,
+                hard_label_input,
                 hard_tradeoff_summary_input,
                 hard_confidence_justification_input,
                 hard_confidence_input,
                 clip_id_input,
-                icl_memory_state,
             ],
             outputs=[
                 env_state,
@@ -1028,8 +912,6 @@ def build_custom_ui() -> gr.Blocks:
                 session_history_cues,
                 session_total_reward,
                 raw_json_box,
-                icl_memory_state,
-                learning_progress_table,
             ],
         )
         hint_btn.click(
@@ -1041,7 +923,6 @@ def build_custom_ui() -> gr.Blocks:
                 easy_observation_input,
                 medium_reasoning_input,
                 hard_tradeoff_summary_input,
-                icl_memory_state,
             ],
             outputs=[
                 env_state,
@@ -1050,50 +931,15 @@ def build_custom_ui() -> gr.Blocks:
                 hard_tradeoff_summary_input,
             ],
         )
-        def _start_baseline_with_corpus(task_id_val: str, env_st: ClipQualityEnvironment | None, icl_mem_st: Any):
-            icl_mem = _resolve_memory(icl_mem_st)
-            run_id, status_md, result_md, btn_upd, timer_upd = _start_baseline_ui_run(task_id_val, icl_mem)
-            return run_id, status_md, result_md, btn_upd, timer_upd, env_st, gr.update(), icl_mem
-
-        def _poll_baseline_with_corpus(
-            run_id: str | None,
-            env_st: ClipQualityEnvironment | None,
-            current_corpus_df: pd.DataFrame | None,
-            icl_mem_st: Any,
-        ):
-            icl_mem = _resolve_memory(icl_mem_st)
-            run_id_out, status_md, result_md, btn_upd, timer_upd = _poll_baseline_ui_run(run_id)
-            # When complete, compute predicted labels and update corpus + learning tables
-            if run_id_out is None and env_st is not None:
-                payload: dict[str, Any] = {}
-                if run_id:
-                    from server.baseline_runs import baseline_run_tracker as _brt
-                    run = _brt.get_run(run_id)
-                    if run and run["status"] == "completed":
-                        payload = run["result"] or {}
-                pred_labels = _baseline_predicted_labels_from_payload(payload, env_st)
-                if pred_labels and current_corpus_df is not None and not current_corpus_df.empty:
-                    df_upd = current_corpus_df.copy()
-                    if "Predicted Label" not in df_upd.columns:
-                        df_upd["Predicted Label"] = "—"
-                    for idx, row in df_upd.iterrows():
-                        cid = str(row.get("Clip ID", ""))
-                        if cid in pred_labels:
-                            df_upd.at[idx, "Predicted Label"] = pred_labels[cid]
-                    learning_df = _learning_progress_df(icl_mem)
-                    return run_id_out, status_md, result_md, btn_upd, timer_upd, env_st, gr.update(value=df_upd), icl_mem, learning_df
-            learning_df = _learning_progress_df(icl_mem)
-            return run_id_out, status_md, result_md, btn_upd, timer_upd, env_st, gr.update(), icl_mem, learning_df
-
         baseline_run_btn.click(
-            _start_baseline_with_corpus,
-            inputs=[task_id, env_state, icl_memory_state],
-            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer, env_state, corpus_table, icl_memory_state],
+            _start_baseline_ui_run,
+            inputs=[task_id],
+            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer],
         )
         baseline_poll_timer.tick(
-            _poll_baseline_with_corpus,
-            inputs=[baseline_run_id_state, env_state, corpus_table, icl_memory_state],
-            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer, env_state, corpus_table, icl_memory_state, learning_progress_table],
+            _poll_baseline_ui_run,
+            inputs=[baseline_run_id_state],
+            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer],
         )
 
     return demo

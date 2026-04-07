@@ -11,7 +11,6 @@ from openenv.core import Environment
 
 from .grader import grade
 from .ground_truth import GTStore
-from .icl_memory import ICLMemory
 from .models import Action, ClipMetadata, EpisodeHistoryItem, HistoryItem, Observation, State
 from .real_clips import load_real_clip_manifest
 from .rubric import RubricState
@@ -99,7 +98,7 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
 
         for clip in corpus:
             clip.setdefault("clip_id", clip.get("id", str(uuid.uuid4())))
-            if not clip.get("expected_label"):
+            if "expected_label" not in clip:
                 clip["expected_label"] = self._rubric.derive_label(clip)
             clip["review_status"] = str(clip.get("review_status", "pending")).lower()
 
@@ -202,18 +201,7 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
             )
         return rows
 
-    def build_quality_hint(
-        self,
-        clip: dict[str, Any] | None = None,
-        icl_memory: "ICLMemory | None" = None,
-    ) -> str:
-        """
-        Build a rubric-anchored quality hint for the current (or given) clip.
-
-        When icl_memory is provided and the clip has prior attempt history,
-        a feedback suffix is appended to tell the agent what went wrong and
-        what to correct — implementing the cross-episode ICL signal.
-        """
+    def build_quality_hint(self, clip: dict[str, Any] | None = None) -> str:
         if clip is None:
             current_index = min(self._state.step_count, max(len(self._episode_plan) - 1, 0))
             if not self._episode_plan:
@@ -221,59 +209,50 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
             clip = self._episode_plan[current_index].clip
         focus_features = self._closest_boundary_features(clip, top_n=2)
         if not focus_features:
-            base_hint = "Use dominant clip metadata cues and compare each value against rubric thresholds."
-        else:
-            segments: list[str] = []
-            for idx, feature in enumerate(focus_features):
-                value = clip.get(feature)
-                if not isinstance(value, (int, float)):
-                    continue
-                status = self._rubric.get_feature_status(feature, float(value))
-                threshold = self._rubric.thresholds.get(feature, {})
-                mode = str(threshold.get("mode", ""))
-                keep_min = float(threshold.get("keep_min", 0.0))
-                keep_max = float(threshold.get("keep_max", 0.0))
-                reject_min = float(threshold.get("reject_min", 0.0))
-                reject_max = float(threshold.get("reject_max", 0.0))
+            return "Use dominant clip metadata cues and compare each value against rubric thresholds."
 
-                if mode == "higher":
-                    if status == "KEEP":
-                        direction = f"above the KEEP threshold ({keep_min:.3g})"
-                    elif status == "REJECT":
-                        direction = f"below the REJECT threshold ({reject_max:.3g})"
-                    else:
-                        direction = f"within the BORDERLINE range [{reject_max:.3g}, {keep_min:.3g})"
-                elif mode == "lower":
-                    if status == "KEEP":
-                        direction = f"below the KEEP ceiling ({keep_max:.3g})"
-                    elif status == "REJECT":
-                        direction = f"above the REJECT threshold ({reject_min:.3g})"
-                    else:
-                        direction = f"within the BORDERLINE range ({keep_max:.3g}, {reject_min:.3g}]"
+        segments: list[str] = []
+        for idx, feature in enumerate(focus_features):
+            value = clip.get(feature)
+            if not isinstance(value, (int, float)):
+                continue
+            status = self._rubric.get_feature_status(feature, float(value))
+            threshold = self._rubric.thresholds.get(feature, {})
+            mode = str(threshold.get("mode", ""))
+            keep_min = float(threshold.get("keep_min", 0.0))
+            keep_max = float(threshold.get("keep_max", 0.0))
+            reject_min = float(threshold.get("reject_min", 0.0))
+            reject_max = float(threshold.get("reject_max", 0.0))
+
+            if mode == "higher":
+                if status == "KEEP":
+                    direction = f"above the KEEP threshold ({keep_min:.3g})"
+                elif status == "REJECT":
+                    direction = f"below the REJECT threshold ({reject_max:.3g})"
                 else:
-                    if status == "KEEP":
-                        direction = f"within the KEEP band [{keep_min:.3g}, {keep_max:.3g}]"
-                    elif status == "REJECT":
-                        direction = f"outside the acceptable range [{reject_min:.3g}, {reject_max:.3g}]"
-                    else:
-                        direction = (
-                            f"within a BORDERLINE edge zone around [{reject_min:.3g}, {keep_min:.3g})"
-                            f" or ({keep_max:.3g}, {reject_max:.3g}]"
-                        )
+                    direction = f"within the BORDERLINE range [{reject_max:.3g}, {keep_min:.3g})"
+            elif mode == "lower":
+                if status == "KEEP":
+                    direction = f"below the KEEP ceiling ({keep_max:.3g})"
+                elif status == "REJECT":
+                    direction = f"above the REJECT threshold ({reject_min:.3g})"
+                else:
+                    direction = f"within the BORDERLINE range ({keep_max:.3g}, {reject_min:.3g}]"
+            else:
+                if status == "KEEP":
+                    direction = f"within the KEEP band [{keep_min:.3g}, {keep_max:.3g}]"
+                elif status == "REJECT":
+                    direction = f"outside the acceptable range [{reject_min:.3g}, {reject_max:.3g}]"
+                else:
+                    direction = (
+                        f"within a BORDERLINE edge zone around [{reject_min:.3g}, {keep_min:.3g})"
+                        f" or ({keep_max:.3g}, {reject_max:.3g}]"
+                    )
 
-                prefix = "" if idx == 0 else " "
-                segments.append(f"{prefix}{feature} is {float(value):.3g}, which is {direction}.")
+            prefix = "" if idx == 0 else " "
+            segments.append(f"{prefix}{feature} is {float(value):.3g}, which is {direction}.")
 
-            base_hint = "".join(segments).strip()
-
-        # Append ICL feedback when session memory has prior history for this clip
-        if icl_memory is not None:
-            clip_id = str(clip.get("clip_id", ""))
-            feedback = icl_memory.get_hint_feedback(clip_id)
-            if feedback:
-                base_hint = f"{base_hint} {feedback}".strip()
-
-        return base_hint
+        return "".join(segments).strip()
 
     def _state_to_observation(self, reward: float, done: bool) -> Observation:
         current_index = min(self._state.step_count, max(len(self._episode_plan) - 1, 0))
@@ -322,9 +301,6 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
                 "reward_total": float(self._last_reward_breakdown["total_reward"]),
                 "session_history": session_history,
                 "corpus_source": self._corpus_source,
-                # Rubric thresholds exposed so the agent can compute RL reasoning
-                # without importing RubricState directly.
-                "rubric_thresholds": self._rubric.get_thresholds_summary(),
             },
         )
 

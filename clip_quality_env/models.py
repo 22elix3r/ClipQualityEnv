@@ -65,12 +65,6 @@ class ClipMetadata(BaseModel):
     environment_tag: Optional[str] = None
     framing: Optional[str] = None
     expected_label: Optional[str] = None
-    # Option-A enriched features
-    sharpness_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    temporal_flicker: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    bg_entropy: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    eye_contact_ratio: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    speech_rate_wpm: Optional[float] = Field(default=None, ge=0.0)
     model_config = {"extra": "allow"}
 
 
