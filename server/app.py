@@ -746,9 +746,9 @@ def build_custom_ui() -> gr.Blocks:
         selected_tab_state = gr.State(value="easy")
         baseline_poll_timer = gr.Timer(value=1.0, active=False)
 
-        gr.HTML("<h2 style='text-align: center; color: #10b981;'>CLIP Quality Analyzer: Judge's Strategic Console</h2>")
+        gr.HTML("<h2 style='text-align: center; color: #10b981;'>CLIP Quality Analyzer: Analyzer's Strategic Console</h2>")
         gr.Markdown(
-            "Welcome, Judge Agent. Use this console to identify data to policy gaps and propose measurable governance refinements."
+            "Welcome, Analyser Agent. Use this console to analyse dataset clips gaps and propose measurable refinements."
         )
 
         with gr.Row():
