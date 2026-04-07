@@ -1,7 +1,6 @@
 """Deterministic clip-quality grader used by `/grader`."""
 from __future__ import annotations
 
-import re
 from typing import Any
 
 
@@ -15,7 +14,6 @@ from server.tasks import TASK_REGISTRY
 _RUBRIC = RubricState()
 _GT = GTStore()
 _VALID_LABELS = {"KEEP", "BORDERLINE", "REJECT"}
-_TEXT_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 
 
 def _clamp01(value: float) -> float:
@@ -82,31 +80,6 @@ def _normalize_action(action_dict: dict[str, Any], clip: dict[str, Any]) -> Acti
     return Action.model_validate(payload)
 
 
-def _mentions_cue(reasoning: str, cue: str) -> bool:
-    text_tokens = set(_TEXT_TOKEN_RE.findall(reasoning.lower()))
-    cue_tokens = [token for token in _TEXT_TOKEN_RE.findall(cue.lower()) if len(token) >= 4]
-    if not cue_tokens:
-        return False
-    overlap = sum(1 for token in cue_tokens if token in text_tokens)
-    needed = 2 if len(cue_tokens) >= 2 else 1
-    return overlap >= needed
-
-
-def _cue_bonus(reasoning: str, clip: dict[str, Any]) -> float:
-    cues = clip.get("quality_cues")
-    if not isinstance(cues, list):
-        return 0.0
-    valid_cues = [str(cue).strip() for cue in cues if str(cue).strip()]
-    if not valid_cues:
-        return 0.0
-    hits = sum(1 for cue in valid_cues if _mentions_cue(reasoning, cue))
-    if hits >= 2:
-        return 0.10
-    if hits == 1:
-        return 0.05
-    return 0.0
-
-
 def grade(action_dict: dict[str, Any], task_id: str, temperature: float = 0.0, seed: int = 42) -> float:
     del temperature, seed
     if task_id not in TASK_REGISTRY:
@@ -116,15 +89,14 @@ def grade(action_dict: dict[str, Any], task_id: str, temperature: float = 0.0, s
         if not clip:
             return 0.0
 
+        # Determine difficulty from task registry so grader applies appropriate strictness
+        difficulty = str(TASK_REGISTRY[task_id].get("difficulty", "easy")).lower()
+
         action = _normalize_action(action_dict, clip)
-        reward = clip_grade(action, clip, _RUBRIC, _GT)
+        reward = clip_grade(action, clip, _RUBRIC, _GT, difficulty=difficulty)
 
-        format_score = float(reward.format_score)
-        label_score = float(reward.label_score)
-        reasoning_score = float(reward.reasoning_score)
-
-        reasoning_score = min(0.30, reasoning_score + _cue_bonus(str(action.reasoning), clip))
-        total = _clamp01(format_score + label_score + reasoning_score)
+        total = _clamp01(float(reward.total))
         return round(total, 4)
     except Exception:
         return 0.0
+

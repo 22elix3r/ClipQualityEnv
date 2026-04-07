@@ -640,12 +640,20 @@ def build_custom_ui() -> gr.Blocks:
         return mem_state if isinstance(mem_state, ICLMemory) else ICLMemory()
 
     def _learning_progress_df(icl_mem: ICLMemory) -> pd.DataFrame:
-        """Build the Learning Progress DataFrame from session ICL memory."""
-        learning_columns = ["Clip ID", "Runs", "Correct/Total", "Best Reward", "Latest Reward", "Best Label", "Expected", "Trend"]
+        """Build the Learning Progress DataFrame from session ICL memory.
+
+        NOTE: 'Expected' column intentionally absent — that would expose ground truth.
+        Correctness is inferred from label_score (>= 0.55 = exact, 0.10-0.54 = partial).
+        """
+        learning_columns = [
+            "Clip ID", "Runs", "Exact/Partial", "Best Reward",
+            "Latest Reward", "Best Label", "Best label_score", "Trend",
+        ]
         rows = icl_mem.all_clip_summary()
         if not rows:
             return pd.DataFrame(columns=learning_columns)
         return pd.DataFrame(rows, columns=learning_columns)
+
 
     def handle_reset(env_state: ClipQualityEnvironment | None, task_id: str):
         env = _resolve_env(env_state)
@@ -735,18 +743,16 @@ def build_custom_ui() -> gr.Blocks:
             obs_dict = obs_obj.model_dump()
             reward = float(obs_obj.reward)
 
-            # Record to session ICL memory (use raw label_score, NOT calibrated reward)
-            # Raw label_score is band-independent: easy tasks cap calibrated reward at 0.32,
-            # so a threshold on calibrated reward would never fire. label_score is always
-            # 0.0 (wrong), 0.25 (close), or 0.60 (correct) regardless of difficulty.
-            expected = str(current_clip.get("expected_label", "")).upper() or None
+            # Record to session ICL memory — use raw label_score only.
+            # DO NOT pass expected_label: ICLMemory must never store ground-truth.
+            # The agent learns from label_score (0.0=wrong, 0.05–0.25=partial, 0.60=correct)
+            # and the total reward signal, not from the answer.
             raw_label_score = float(obs_obj.info.get("label_score", 0.0))
             icl_mem.record(
                 clip_id=clip_id_val,
                 label=action_dict["label"],
                 reward=reward,
                 reasoning=str(action_dict.get("reasoning", "")),
-                expected_label=expected,
                 episode=icl_mem.episode_count,
                 step=step_idx + 1,
                 label_score=raw_label_score,

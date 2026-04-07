@@ -29,11 +29,6 @@ MEDIUM_TASK = {
             "environment_tag": "office",
             "framing": "left",
             "expected_label": "BORDERLINE",
-            "quality_cues": [
-                "face_confidence is slightly below keep threshold",
-                "audio_snr_db and motion_score are borderline",
-                "no hard reject signal",
-            ],
             "review_status": "pending",
         },
         {
@@ -59,11 +54,6 @@ MEDIUM_TASK = {
             "environment_tag": "podcast_corner",
             "framing": "front",
             "expected_label": "BORDERLINE",
-            "quality_cues": [
-                "duration_s is near upper keep band edge",
-                "face_area_ratio is borderline small",
-                "audio_snr_db is weak but not catastrophic",
-            ],
             "review_status": "pending",
         },
         {
@@ -89,10 +79,6 @@ MEDIUM_TASK = {
             "environment_tag": "workstation",
             "framing": "front",
             "expected_label": "BORDERLINE",
-            "quality_cues": [
-                "face_confidence is good but face_area_ratio remains only moderate",
-                "motion_score and mouth_open_ratio are near boundary values",
-            ],
             "review_status": "pending",
         },
         {
@@ -118,11 +104,6 @@ MEDIUM_TASK = {
             "environment_tag": "classroom",
             "framing": "offgaze",
             "expected_label": "BORDERLINE",
-            "quality_cues": [
-                "duration_s is barely acceptable",
-                "audio_snr_db and lighting_uniformity are borderline",
-                "motion_score is elevated but below hard reject cutoff",
-            ],
             "review_status": "pending",
         },
         {
@@ -148,11 +129,6 @@ MEDIUM_TASK = {
             "environment_tag": "studio",
             "framing": "front",
             "expected_label": "KEEP",
-            "quality_cues": [
-                "strong face_confidence and face_area_ratio",
-                "clean audio and stable motion",
-                "well lit with no occlusion",
-            ],
             "review_status": "pending",
         },
     ],

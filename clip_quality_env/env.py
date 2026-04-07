@@ -275,23 +275,52 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
 
         return base_hint
 
+    # ── Helpers to strip ground-truth from agent-facing payloads ─────────────
+
+    @staticmethod
+    def _sanitize_clip_for_agent(clip: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy of the clip dict with all answer-revealing fields removed."""
+        to_strip = {"expected_label", "quality_cues"}
+        return {k: v for k, v in clip.items() if k not in to_strip}
+
+    @staticmethod
+    def _sanitize_corpus_for_agent(corpus: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Strip expected_label and quality_cues from every clip in the corpus."""
+        to_strip = {"expected_label", "quality_cues"}
+        return [{k: v for k, v in item.items() if k not in to_strip} for item in corpus]
+
+    @staticmethod
+    def _sanitize_session_history(history: list[Any]) -> list[dict[str, Any]]:
+        """Strip expected_label from episode history entries sent to the agent."""
+        result = []
+        for item in history:
+            d = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+            d.pop("expected_label", None)
+            result.append(d)
+        return result
+
     def _state_to_observation(self, reward: float, done: bool) -> Observation:
         current_index = min(self._state.step_count, max(len(self._episode_plan) - 1, 0))
         current = self._episode_plan[current_index]
         corpus = self._episode_corpus.get(current.task_id, [])
-        full_corpus = list(corpus)
+        # Sanitize corpus — agent must NOT see expected_label or quality_cues
+        agent_corpus = self._sanitize_corpus_for_agent(list(corpus))
+        # Build history items with NO expected_label
         history_items = [
             HistoryItem(
                 step=h.step,
                 clip_id=h.clip_id,
                 label=h.label,
-                expected_label=h.expected_label,
                 reward=h.reward,
             )
             for h in self._state.episode_history
         ]
         steps_remaining = max(0, self._state.max_steps - self._state.step_count)
-        session_history = [item.model_dump() for item in self._state.episode_history]
+        # Session history for UI — also strip expected_label
+        session_history = self._sanitize_session_history(self._state.episode_history)
+        # Sanitize clip metadata — ClipMetadata has extra="ignore" so extra keys
+        # (including expected_label) are silently dropped on model_validate.
+        agent_clip = self._sanitize_clip_for_agent(current.clip)
         return Observation(
             task_id=current.task_id,
             episode_id=self._state.episode_id,
@@ -300,11 +329,11 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
             step=max(1, self._state.step_count + (0 if done else 1)),
             rubric_version=self._rubric.version,
             rubric_summary=self._rubric.to_prompt_text(),
-            clip_metadata=ClipMetadata.model_validate(current.clip),
+            clip_metadata=ClipMetadata.model_validate(agent_clip),
             history=history_items,
             corpus_size=len(corpus),
-            corpus_shown=len(full_corpus),
-            data_corpus=full_corpus,
+            corpus_shown=len(agent_corpus),
+            data_corpus=agent_corpus,
             reward=float(reward),
             done=done,
             info={
@@ -322,9 +351,9 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
                 "reward_total": float(self._last_reward_breakdown["total_reward"]),
                 "session_history": session_history,
                 "corpus_source": self._corpus_source,
-                # Rubric thresholds exposed so the agent can compute RL reasoning
-                # without importing RubricState directly.
-                "rubric_thresholds": self._rubric.get_thresholds_summary(),
+                # rubric_thresholds intentionally OMITTED — exposing the grader's
+                # internal threshold values lets the agent reconstruct the exact
+                # decision function and achieve perfect scores trivially.
             },
         )
 

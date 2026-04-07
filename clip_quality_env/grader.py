@@ -3,6 +3,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .difficulty import (
+    get_partial_label_score,
+    get_reasoning_feature_min,
+    requires_directional_cues,
+)
 from .ground_truth import GTStore
 from .models import Action, Reward
 from .rubric import RubricState
@@ -33,15 +38,35 @@ def _score_format(action: dict[str, Any]) -> float:
     return 0.0
 
 
-def _score_label(label: str, clip: dict[str, Any], rubric: RubricState, gt: GTStore) -> float:
+def _score_label(
+    label: str,
+    clip: dict[str, Any],
+    rubric: RubricState,
+    gt: GTStore,
+    difficulty: str | None = None,
+) -> float:
+    """Score the predicted label against ground truth.
+
+    Difficulty affects partial-match credit:
+      Easy   → one tier off earns 0.25 (generous)
+      Medium → one tier off earns 0.15
+      Hard   → one tier off earns 0.05 (nearly penalised)
+    """
     clip_id = str(clip.get("clip_id", ""))
     gt_label = gt.lookup(clip_id)
     if gt_label is None:
         gt_label = rubric.derive_label(clip)
     if label == gt_label:
         return 0.60
-    if gt_label == "BORDERLINE" and label in {"KEEP", "REJECT"}:
-        return 0.25
+    # Partial credit: one tier off
+    # BORDERLINE ↔ KEEP or BORDERLINE ↔ REJECT counts as partial
+    # KEEP ↔ REJECT is a full-miss regardless of difficulty
+    is_partial = (
+        (gt_label == "BORDERLINE" and label in {"KEEP", "REJECT"})
+        or (label == "BORDERLINE" and gt_label in {"KEEP", "REJECT"})
+    )
+    if is_partial:
+        return get_partial_label_score(difficulty)
     return 0.0
 
 
@@ -58,7 +83,9 @@ def _contains_directional_cue(reasoning: str, feature: str, status: str) -> bool
     return any(w in text for w in ("borderline", "mixed", "ambiguous", "tradeoff", "conflict"))
 
 
-def _check_directional_reasoning(reasoning: str, clip: dict[str, Any], dominant_features: list[str], rubric: RubricState) -> bool:
+def _check_directional_reasoning(
+    reasoning: str, clip: dict[str, Any], dominant_features: list[str], rubric: RubricState
+) -> bool:
     if not reasoning.strip():
         return False
     checks = 0
@@ -78,28 +105,81 @@ def _check_directional_reasoning(reasoning: str, clip: dict[str, Any], dominant_
     return matches >= 1
 
 
-def _score_reasoning(reasoning: str, clip: dict[str, Any], rubric: RubricState) -> float:
+def _score_reasoning(
+    reasoning: str,
+    clip: dict[str, Any],
+    rubric: RubricState,
+    difficulty: str | None = None,
+) -> float:
+    """Score reasoning quality with difficulty-adjusted thresholds.
+
+    Easy:
+      +0.10 — mentions ≥1 dominant feature (lenient)
+      +0.10 — directional cue present (bonus, not required)
+      +0.10 — no hallucinated feature tokens
+    Medium:
+      +0.10 — mentions ≥2 dominant features (required)
+      +0.10 — directional cue required
+      +0.10 — no hallucinated feature tokens
+    Hard:
+      +0.10 — mentions ≥2 dominant features (required)
+      +0.10 — directional cue required
+      +0.10 — no hallucinated feature tokens AND directional cue matched on both features
+    """
     score = 0.0
     lower_reasoning = reasoning.lower()
     dominant_features = rubric.get_dominant_features(clip)
 
+    feature_min = get_reasoning_feature_min(difficulty)
+    needs_directional = requires_directional_cues(difficulty)
+
     mentioned = sum(1 for f in dominant_features if f.lower() in lower_reasoning)
     if mentioned >= 2:
         score += 0.10
-    elif mentioned == 1:
-        score += 0.05
+    elif mentioned >= 1 and feature_min <= 1:
+        # Easy: one mention earns partial credit toward the 0.10 slot
+        score += 0.07
 
-    if _check_directional_reasoning(reasoning, clip, dominant_features, rubric):
+    # Directional cue check
+    has_directional = _check_directional_reasoning(reasoning, clip, dominant_features, rubric)
+    if has_directional:
         score += 0.10
+    elif not needs_directional:
+        # Easy mode: award directional sub-score even without explicit cues
+        # if the reasoning text is non-trivial (>30 chars)
+        if len(reasoning.strip()) > 30:
+            score += 0.05
 
+    # Hallucination check — only count feature-style tokens as possible hallucinations
     all_feature_names = {k.lower() for k in clip.keys()}
     hallucinated = [
         token
         for token in FEATURE_TOKEN_RE.findall(lower_reasoning)
         if token not in all_feature_names
     ]
-    if len(hallucinated) == 0:
-        score += 0.10
+
+    if difficulty == "hard":
+        # Hard: no hallucinated tokens AND directional matched on ≥2 features
+        # requires more precise reasoning
+        checks_passed = 0
+        for feature in dominant_features:
+            if feature not in clip:
+                continue
+            value = clip[feature]
+            if not isinstance(value, (int, float)):
+                continue
+            status = rubric.get_feature_status(feature, float(value))
+            if _contains_directional_cue(reasoning, feature, status):
+                checks_passed += 1
+        if len(hallucinated) == 0 and checks_passed >= 2:
+            score += 0.10
+        elif len(hallucinated) == 0 and checks_passed >= 1:
+            score += 0.05
+    else:
+        # Easy/Medium: zero hallucinated tokens earns this sub-score
+        if len(hallucinated) == 0:
+            score += 0.10
+
     return min(max(score, 0.0), 0.30)
 
 
@@ -111,15 +191,19 @@ def grade(
     difficulty: str | None = None,
 ) -> Reward:
     """
-    Fully deterministic reward decomposition.
+    Fully deterministic reward decomposition with difficulty-proportional strictness.
+
+    Difficulty affects:
+      - label_score for partial matches (easy=0.25, medium=0.15, hard=0.05)
+      - reasoning_score requirements (easy=lenient, medium=strict, hard=strictest)
     """
     payload = _normalize_action(action)
     label = str(payload["label"]).upper()
     reasoning = str(payload["reasoning"])
 
     format_score = _score_format(payload)
-    label_score = _score_label(label, clip, rubric, gt)
-    reasoning_score = _score_reasoning(reasoning, clip, rubric)
+    label_score = _score_label(label, clip, rubric, gt, difficulty=difficulty)
+    reasoning_score = _score_reasoning(reasoning, clip, rubric, difficulty=difficulty)
     total = format_score + label_score + reasoning_score
 
     return Reward(

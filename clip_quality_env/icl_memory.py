@@ -8,6 +8,13 @@ to a single browser session.  It accumulates per-clip prediction history across
 every "Execute Strategic Step" / baseline run in that session, and feeds
 progressively richer context back into the agent so that reward improves over
 time without any model weight updates.
+
+PRIVACY CONTRACT
+────────────────
+This module NEVER stores or exposes expected_label (ground truth).
+The agent learns exclusively from the reward / label_score signal returned
+by the grader after each attempt.  Any field that could indirectly reveal
+the answer (label_correct, expected_label) is intentionally absent.
 """
 from __future__ import annotations
 
@@ -21,12 +28,16 @@ class ICLMemory:
     Per-clip records
     ─────────────────
     Each attempt stores:
-      label          – predicted label
-      reward         – total reward returned by the grader
-      reasoning      – the reasoning text submitted
-      expected_label – ground-truth label (if available)
-      episode        – episode counter at the time of the attempt
-      step           – step index within the episode
+      label       – predicted label
+      reward      – total reward returned by the grader
+      label_score – raw (uncalibrated) label component: 0.0, 0.05/0.15/0.25, or 0.60
+      reasoning   – the reasoning text submitted
+      episode     – episode counter at the time of the attempt
+      step        – step index within the episode
+
+    Intentionally ABSENT:
+      expected_label – never stored; would leak ground truth to the agent
+      label_correct  – equivalent to storing expected_label; also absent
 
     Public surface used by the agent and env
     ─────────────────────────────────────────
@@ -54,33 +65,28 @@ class ICLMemory:
         label: str,
         reward: float,
         reasoning: str,
-        expected_label: str | None,
         episode: int,
         step: int,
         label_score: float = 0.0,
+        # expected_label intentionally removed — must never be stored
+        **_ignored: Any,
     ) -> None:
         """Append one prediction attempt to the clip's history.
 
-        label_score is the RAW (uncalibrated) label component from the grader
-        (0.0, 0.25, or 0.60), NOT the difficulty-band-calibrated total reward.
-        This is critical: calibrated rewards are band-capped per difficulty, so
-        the 0.50 threshold would be unreachable on easy tasks even with a
-        perfect prediction.  Storing the raw label_score lets us make
-        band-independent decisions about label correctness.
+        label_score is the RAW label component from the grader
+        (0.0 = wrong, 0.05/0.15/0.25 = partial depending on difficulty, 0.60 = correct).
+        It is band-independent and difficulty-aware — storing it lets the agent
+        make correct trial-and-error decisions without seeing the answer.
         """
         if clip_id not in self.records:
             self.records[clip_id] = []
         label_upper = str(label).upper()
-        exp_upper = str(expected_label or "").upper() or None
-        label_correct = bool(exp_upper and label_upper == exp_upper)
         self.records[clip_id].append(
             {
                 "label": label_upper,
                 "reward": float(reward),
                 "label_score": float(label_score),
-                "label_correct": label_correct,
                 "reasoning": str(reasoning),
-                "expected_label": exp_upper,
                 "episode": int(episode),
                 "step": int(step),
             }
@@ -103,8 +109,9 @@ class ICLMemory:
         Build an ICL context block to prepend to the agent's prompt.
 
         Shows the agent its prior attempts and their label_score (the raw,
-        band-independent reward component for label correctness).  The agent
-        NEVER sees expected_label — it must improve via trial-and-error.
+        difficulty-aware reward component for label correctness).  The agent
+        NEVER sees expected_label — it must improve via trial-and-error on
+        the reward signal alone.
         """
         attempts = self.records.get(clip_id, [])
         if not attempts:
@@ -125,8 +132,8 @@ class ICLMemory:
             ls = float(att.get("label_score", 0.0))
             if ls >= 0.55:
                 grade_tag = "✓ CORRECT (label_score=0.60)"
-            elif ls >= 0.20:
-                grade_tag = "~ PARTIAL (label_score=0.25, one tier off)"
+            elif ls >= 0.10:
+                grade_tag = f"~ PARTIAL (label_score={ls:.2f}, one tier off)"
             else:
                 grade_tag = "✗ WRONG (label_score=0.00)"
             lines.append(
@@ -147,7 +154,7 @@ class ICLMemory:
                 "field name with directional comparisons (above/below threshold). "
                 "Ensure no hallucinated feature names."
             )
-        elif last_ls >= 0.20:
+        elif last_ls >= 0.10:
             directive = (
                 f"Your last label ({last['label']}) was PARTIALLY correct (one tier off). "
                 f"Try a different label this time — you are close but not exact. "
@@ -168,7 +175,7 @@ class ICLMemory:
         """
         Short suffix appended to the quality hint when there is prior history.
 
-        Uses label_score ONLY \u2014 never reveals expected_label to the agent.
+        Uses label_score ONLY — never reveals expected_label to the agent.
         """
         attempts = self.records.get(clip_id, [])
         if not attempts:
@@ -178,14 +185,14 @@ class ICLMemory:
         ls = float(last.get("label_score", 0.0))
 
         if ls >= 0.55:
-            # Label was correct \u2014 push for reasoning refinement only
+            # Label was correct — push for reasoning refinement only
             return (
                 f"Your previous label ({last['label']}) scored well. Keep it. "
                 f"Focus on strengthening reasoning: cite dominant features with "
                 f"exact values and directional comparisons against thresholds."
             )
-        elif ls >= 0.20:
-            # Partial match \u2014 one tier off
+        elif ls >= 0.10:
+            # Partial match — one tier off
             return (
                 f"Previous label ({last['label']}) was partially correct (one tier off, "
                 f"label_score={ls:.2f}). Try a different label this time."
@@ -212,12 +219,16 @@ class ICLMemory:
         """
         Returns one summary row per clip_id suitable for pandas DataFrame.
         Used by the Learning Progress panel in the UI.
+
+        NOTE: expected_label is NOT included — the agent should not see it.
+        The "Correct" column shows reward-based progress only.
         """
         rows: list[dict[str, Any]] = []
         for clip_id, attempts in self.records.items():
             if not attempts:
                 continue
             rewards = [a["reward"] for a in attempts]
+            label_scores = [a["label_score"] for a in attempts]
             best = self._best_attempt(clip_id)
             last = attempts[-1]
             # Trend arrow
@@ -232,19 +243,19 @@ class ICLMemory:
             else:
                 trend = "— First run"
 
-            # Check label correctness trend
-            correct_count = sum(1 for a in attempts if a.get("label_correct"))
-            match_ratio = f"{correct_count}/{len(attempts)}"
+            # Correctness inferred from label_score (>= 0.55 = exact match)
+            exact_count = sum(1 for ls in label_scores if ls >= 0.55)
+            partial_count = sum(1 for ls in label_scores if 0.10 <= ls < 0.55)
 
             rows.append(
                 {
                     "Clip ID": clip_id,
                     "Runs": len(attempts),
-                    "Correct/Total": match_ratio,
+                    "Exact/Partial": f"{exact_count}✓ {partial_count}~",
                     "Best Reward": round(max(rewards), 3),
                     "Latest Reward": round(last["reward"], 3),
                     "Best Label": best["label"] if best else "—",
-                    "Expected": last.get("expected_label") or "—",
+                    "Best label_score": round(max(label_scores), 2),
                     "Trend": trend,
                 }
             )

@@ -29,11 +29,6 @@ EASY_TASK = {
             "environment_tag": "studio",
             "framing": "front",
             "expected_label": "KEEP",
-            "quality_cues": [
-                "high face_confidence and large face_area_ratio",
-                "low motion_score and clean audio_snr_db",
-                "uniform lighting with no occlusion",
-            ],
             "review_status": "pending",
         },
         {
@@ -59,11 +54,6 @@ EASY_TASK = {
             "environment_tag": "office",
             "framing": "front",
             "expected_label": "KEEP",
-            "quality_cues": [
-                "face_confidence is high",
-                "motion_score is low",
-                "audio_snr_db is comfortably above keep threshold",
-            ],
             "review_status": "pending",
         },
         {
@@ -89,10 +79,6 @@ EASY_TASK = {
             "environment_tag": "home_office",
             "framing": "front",
             "expected_label": "BORDERLINE",
-            "quality_cues": [
-                "face_area_ratio sits on the keep boundary",
-                "audio_snr_db and motion_score are borderline",
-            ],
             "review_status": "pending",
         },
         {
@@ -118,11 +104,6 @@ EASY_TASK = {
             "environment_tag": "corridor",
             "framing": "offgaze",
             "expected_label": "REJECT",
-            "quality_cues": [
-                "occlusion_present is true",
-                "face_confidence is too low and motion_score is too high",
-                "audio_snr_db and lighting_uniformity are below reject thresholds",
-            ],
             "review_status": "pending",
         },
         {
@@ -148,11 +129,6 @@ EASY_TASK = {
             "environment_tag": "street_interview",
             "framing": "left",
             "expected_label": "REJECT",
-            "quality_cues": [
-                "face_confidence is below keep range",
-                "motion_score is reject-level",
-                "audio_snr_db is noisy and lighting is poor",
-            ],
             "review_status": "pending",
         },
     ],

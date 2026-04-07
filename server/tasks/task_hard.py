@@ -29,11 +29,6 @@ HARD_TASK = {
             "environment_tag": "event_hall",
             "framing": "front",
             "expected_label": "BORDERLINE",
-            "quality_cues": [
-                "strong face_confidence conflicts with noisy audio_snr_db",
-                "motion_score is near reject but not over threshold",
-                "lighting is acceptable but not robust",
-            ],
             "review_status": "pending",
         },
         {
@@ -59,11 +54,6 @@ HARD_TASK = {
             "environment_tag": "street_interview",
             "framing": "offgaze",
             "expected_label": "BORDERLINE",
-            "quality_cues": [
-                "motion_score is high but audio_snr_db remains salvageable",
-                "face_confidence and lighting_uniformity are weak",
-                "multiple borderline cues create mixed confidence",
-            ],
             "review_status": "pending",
         },
         {
@@ -89,11 +79,6 @@ HARD_TASK = {
             "environment_tag": "home_office",
             "framing": "left",
             "expected_label": "REJECT",
-            "quality_cues": [
-                "face_confidence is near reject threshold",
-                "face_area_ratio is too small and motion is elevated",
-                "combined weak visual signals push toward reject",
-            ],
             "review_status": "pending",
         },
         {
@@ -119,11 +104,6 @@ HARD_TASK = {
             "environment_tag": "conference_room",
             "framing": "offgaze",
             "expected_label": "REJECT",
-            "quality_cues": [
-                "face_confidence is below reject ceiling",
-                "audio_snr_db is noisy and lighting is poor",
-                "duration_s long but quality remains low",
-            ],
             "review_status": "pending",
         },
         {
@@ -149,11 +129,6 @@ HARD_TASK = {
             "environment_tag": "studio",
             "framing": "front",
             "expected_label": "KEEP",
-            "quality_cues": [
-                "face metrics are above keep threshold",
-                "audio_snr_db is clean and motion_score is controlled",
-                "consistent lighting and framing support keep decision",
-            ],
             "review_status": "pending",
         },
     ],

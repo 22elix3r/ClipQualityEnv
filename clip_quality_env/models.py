@@ -42,7 +42,12 @@ class CorpusIncident(BaseModel):
 
 
 class ClipMetadata(BaseModel):
-    """Clip metadata payload consumed by the agent."""
+    """Clip metadata payload consumed by the agent.
+
+    NOTE: expected_label is intentionally excluded from this model.
+    It lives only on the raw clip dict inside EpisodeClip.clip and is
+    accessed by the grader directly — never serialised to the agent.
+    """
 
     clip_id: str
     duration_s: Optional[float] = Field(default=None, ge=0.0)
@@ -64,23 +69,23 @@ class ClipMetadata(BaseModel):
     occlusion_present: bool = False
     environment_tag: Optional[str] = None
     framing: Optional[str] = None
-    expected_label: Optional[str] = None
     # Option-A enriched features
     sharpness_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     temporal_flicker: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     bg_entropy: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     eye_contact_ratio: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     speech_rate_wpm: Optional[float] = Field(default=None, ge=0.0)
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "ignore"}
 
 
 class HistoryItem(BaseModel):
+    """Agent-facing step history — contains NO ground-truth labels."""
+
     step: int = 0
     clip_id: str = ""
-    label: str = ""
-    expected_label: str = ""
-    reward: float = 0.0
-    model_config = {"extra": "allow"}
+    label: str = ""       # the agent's own submitted label
+    reward: float = 0.0   # reward signal — the only feedback the agent gets
+    model_config = {"extra": "ignore"}
 
 
 class EpisodeHistoryItem(BaseModel):

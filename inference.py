@@ -6,17 +6,25 @@ inference.py — ClipQualityAgent with In-Context Reinforcement Learning (ICL-RL
 Architecture (zero gradient, context-only learning):
   1. Strategic system prompt  — enforces feature-first, directional reasoning
   2. ICL context injection    — feeds prior reward/label history into every call
-  3. Grader-aligned reasoning — RL_reasoning() guarantees ≥ 0.20 reasoning_score
-                                even in purely heuristic (no-LLM) mode
+  3. Imperfect heuristic      — a deliberately lossy fallback that does NOT
+                                replicate the grader's exact logic; the agent
+                                must learn from the reward signal to improve
   4. Memory-guided labels     — uses best past label when heuristic is uncertain
   5. Cross-step feedback      — after every step the reward is written to ICLMemory;
                                 the next step sees "you earned X last time, fix Y"
 
-The reward improvement mechanic (mirrors reference architecture):
-  Step 1: fresh clip → heuristic/LLM guess → reward ~0.12
-  Step 2: memory injects "prior reward=0.12, label=WRONG, directive=correct it"
-        → agent corrects label + adds directional cues → reward ~0.68
-  Step 3-5: memory-enriched reasoning pushes toward 0.90+ total
+PRIVACY CONTRACT
+────────────────
+The agent NEVER receives:
+  - expected_label (stripped by env.py before observation is built)
+  - rubric_thresholds (removed from obs.info to prevent grader recreation)
+  - quality_cues (stripped from data_corpus by env.py)
+  - Any GT-derived signal from ICLMemory (expected_label removed from record())
+
+The agent learns purely from:
+  - Raw clip metadata features
+  - High-level rubric summary text (human-readable, not threshold values)
+  - The reward / label_score signal returned after each step
 """
 from __future__ import annotations
 
@@ -84,7 +92,7 @@ RULES (violation = reward penalty):
    using directional language: above, below, stable, high, low, over, under.
 3. Do NOT invent feature names not present in the clip metadata dict.
 4. Do NOT use vague words: might, perhaps, generally, seems, appears, could.
-5. CONFIDENCE must be a float in [0.0, 1.0].  Use ≥ 0.80 for clear KEEP/REJECT cases.
+5. CONFIDENCE must be a float in [0.0, 1.0].  Use >= 0.80 for clear KEEP/REJECT cases.
 6. If ICL history is provided, you MUST improve upon the stated prior reward.
 7. Respond with valid JSON only — no markdown, no explanation outside the JSON object.
 
@@ -101,10 +109,12 @@ class ClipQualityAgent:
     LLM clip-quality agent with ICL-RL feedback loop.
 
     When a client is available: calls the LLM with a strategically-engineered
-    prompt that includes rubric context, quality hint, and ICL memory.
+    prompt that includes rubric context and ICL memory.
 
-    When no client: falls back to rubric-heuristic labels + grader-aligned
-    RL reasoning that reliably scores the full 0.30 reasoning_score.
+    When no client: falls back to a deliberately imperfect heuristic that uses
+    only a SUBSET of features and simplified thresholds.  This means the agent
+    will make mistakes on borderline / hard clips and must use the reward signal
+    (via ICL memory) to improve over multiple episodes.
     """
 
     def __init__(self, client: OpenAI | None, model: str) -> None:
@@ -130,50 +140,60 @@ class ClipQualityAgent:
         except Exception:
             return None
 
-    # ── Heuristic helpers ─────────────────────────────────────────────────────
+    # ── Imperfect heuristic fallback ──────────────────────────────────────────
 
     def _heuristic_label(self, clip: Dict[str, Any]) -> str:
-        """Hard-rule fallback label derived from rubric thresholds."""
+        """
+        Deliberately imperfect heuristic using only a SUBSET of features with
+        SIMPLIFIED (not grader-precise) thresholds.
+
+        Purpose: ensure the fallback path does NOT reproduce the grader's exact
+        rubric logic — which would give the agent a free perfect score.  Instead
+        this heuristic will be right on clear-cut clips but wrong on borderline
+        and hard clips, forcing the agent to learn from reward signals.
+
+        Simplified rules (intentionally coarser than the rubric):
+          - Hard reject: occlusion present
+          - Hard reject: face_confidence < 0.60  (rubric uses 0.65 — intentionally looser)
+          - Hard reject: motion_score > 0.50      (rubric uses 0.45 — intentionally looser)
+          - KEEP signal: face_confidence >= 0.85 AND motion_score <= 0.20
+          - Otherwise: BORDERLINE (default)
+        """
         if bool(clip.get("occlusion_present")):
             return "REJECT"
-        if float(clip.get("motion_score", 0.0)) > 0.45:
+        face_conf = float(clip.get("face_confidence", 0.5))
+        motion = float(clip.get("motion_score", 0.5))
+
+        # Hard rejects on severe values only (coarser thresholds than grader)
+        if face_conf < 0.60:
             return "REJECT"
-        if float(clip.get("face_confidence", 0.0)) < 0.65:
-            return "REJECT"
-        if float(clip.get("duration_s", 0.0)) < 4.0:
+        if motion > 0.50:
             return "REJECT"
 
-        keep_signals = 0
-        if float(clip.get("face_area_ratio", 0.0)) >= 0.25:
-            keep_signals += 1
-        if float(clip.get("face_confidence", 0.0)) >= 0.8:
-            keep_signals += 1
-        if float(clip.get("motion_score", 1.0)) <= 0.25:
-            keep_signals += 1
-        if float(clip.get("audio_snr_db", 0.0)) >= 20.0:
-            keep_signals += 1
-        if float(clip.get("lighting_uniformity", 0.0)) >= 0.65:
-            keep_signals += 1
-        return "KEEP" if keep_signals >= 4 else "BORDERLINE"
+        # Only call KEEP when both primary signals are clearly good
+        if face_conf >= 0.85 and motion <= 0.20:
+            return "KEEP"
+
+        # Default — the agent must learn when to deviate from this
+        return "BORDERLINE"
 
     def _memory_guided_label(
         self, clip: Dict[str, Any], icl_memory: ICLMemory | None
     ) -> str:
         """
-        Select the best label using **reward-based trial-and-error**.
+        Select the best label using reward-based trial-and-error.
 
         The agent NEVER sees expected_label.  It learns purely from the raw
         label_score returned by the grader after each attempt:
-          • label_score = 0.60 → exact match (correct label)
-          • label_score = 0.25 → partial match (one tier off)
-          • label_score = 0.00 → completely wrong
+          - label_score >= 0.55 → exact match (correct label)
+          - label_score >= 0.10 → partial match (one tier off)
+          - label_score == 0.00 → completely wrong
 
         Strategy:
-        1. If any prior attempt scored 0.60 → use that label (it was correct).
-        2. If all tried labels scored 0.00 → try an untried label.
-        3. If a label scored 0.25 (partial) → it was one tier off; try the
-           remaining untried label.
-        4. No history → deterministic heuristic.
+        1. If any prior attempt scored >= 0.55 → use that label (it was correct).
+        2. If no winner yet, use heuristic if untried.
+        3. If heuristic was tried and failed, try untried labels systematically.
+        4. All 3 tried → return highest-scoring one.
         """
         ALL_LABELS = ["KEEP", "BORDERLINE", "REJECT"]
 
@@ -188,145 +208,79 @@ class ClipQualityAgent:
         label_scores: Dict[str, float] = {}
         for att in attempts:
             lbl = str(att.get("label", "")).upper()
-            score = float(att.get("label_score", 0.0))
+            ls = float(att.get("label_score", 0.0))
             if lbl in ALL_LABELS:
-                label_scores[lbl] = max(label_scores.get(lbl, 0.0), score)
+                label_scores[lbl] = max(label_scores.get(lbl, 0.0), ls)
 
-        # Tier 1: any label scored 0.60 (exact match) → lock it in
-        for lbl, score in label_scores.items():
-            if score >= 0.55:  # 0.60 with small float tolerance
+        # Tier 1: any label scored >= 0.55 (exact match) → lock it in
+        for lbl, ls in label_scores.items():
+            if ls >= 0.55:
                 return lbl
 
         # Tier 2: find labels we haven't tried yet
         tried = set(label_scores.keys())
         untried = [lbl for lbl in ALL_LABELS if lbl not in tried]
 
-        # Tier 3: if there's a partial match (0.25), the correct label is
-        # one tier away.  Prefer untried labels, but if all are tried,
-        # pick the one with the best score.
         if untried:
-            # Preference: heuristic's guess first if it's untried
+            # Prefer heuristic's guess if it's untried
             heuristic_guess = self._heuristic_label(clip)
             if heuristic_guess in untried:
                 return heuristic_guess
             return untried[0]
 
-        # All 3 labels have been tried — return whichever scored highest
+        # All 3 labels tried — return whichever scored highest
         best_label = max(label_scores, key=lambda k: label_scores[k])
         return best_label
 
-    # ── Grader-aligned reasoning ───────────────────────────────────────────────
+    # ── Reasoning builder ─────────────────────────────────────────────────────
 
-    def _get_dominant_features(
-        self, clip: Dict[str, Any], rubric_thresholds: dict[str, Any]
-    ) -> list[str]:
-        """
-        Replicates RubricState.get_dominant_features() without importing the
-        full rubric object — works directly from the threshold dict serialized
-        into obs.info.
-        """
-        scored: list[tuple[float, str]] = []
-        for feature, t in rubric_thresholds.items():
-            if feature not in clip:
-                continue
-            value = clip[feature]
-            if not isinstance(value, (int, float)):
-                continue
-            mode = str(t.get("mode", ""))
-            keep_min = float(t.get("keep_min", 0.0))
-            keep_max = float(t.get("keep_max", 1.0))
-            reject_min = float(t.get("reject_min", 0.0))
-            reject_max = float(t.get("reject_max", 0.0))
-            v = float(value)
-            if mode == "higher":
-                status = "KEEP" if v >= keep_min else ("REJECT" if v < reject_max else "BORDERLINE")
-            elif mode == "lower":
-                status = "KEEP" if v <= keep_max else ("REJECT" if v > reject_min else "BORDERLINE")
-            else:
-                status = (
-                    "KEEP" if keep_min <= v <= keep_max
-                    else "REJECT" if v < reject_min or v > reject_max
-                    else "BORDERLINE"
-                )
-            base = {"REJECT": 3.0, "BORDERLINE": 2.0, "KEEP": 1.0}[status]
-            scored.append((base, feature))
-        scored.sort(reverse=True, key=lambda x: x[0])
-        return [f for _, f in scored[:2]]
-
-    def _rl_reasoning(
+    def _build_reasoning(
         self,
         clip: Dict[str, Any],
-        dominant_features: list[str],
         label: str,
-        rubric_thresholds: dict[str, Any],
         quality_hint: str = "",
     ) -> str:
         """
-        Build reasoning that reliably satisfies the grader's three reasoning
-        sub-scores:
-          +0.10 — mentions ≥2 dominant features
-          +0.10 — directional cue matches rubric status
-          +0.10 — no hallucinated feature tokens
+        Build a concise reasoning string from clip metadata values.
+
+        Uses only the raw feature values — NOT the grader's internal thresholds.
+        The agent describes what it observes and why it picked the label.
         """
         parts: list[str] = []
 
-        for feature in dominant_features:
-            value = clip.get(feature)
-            if not isinstance(value, (int, float)):
-                continue
-            t = rubric_thresholds.get(feature, {})
-            mode = str(t.get("mode", ""))
-            keep_min = float(t.get("keep_min", 0.0))
-            keep_max = float(t.get("keep_max", 1.0))
-            reject_min = float(t.get("reject_min", 0.0))
-            reject_max = float(t.get("reject_max", 0.0))
-            v = float(value)
+        face_conf = clip.get("face_confidence")
+        motion = clip.get("motion_score")
+        audio = clip.get("audio_snr_db")
+        lighting = clip.get("lighting_uniformity")
+        face_area = clip.get("face_area_ratio")
 
-            if mode == "higher":
-                if v >= keep_min:
-                    parts.append(
-                        f"{feature} is {v:.3g}, well above the KEEP threshold ({keep_min:.3g}), indicating high quality."
-                    )
-                elif v < reject_max:
-                    parts.append(
-                        f"{feature} is {v:.3g}, low and below the reject boundary ({reject_max:.3g}), indicating poor quality."
-                    )
-                else:
-                    parts.append(
-                        f"{feature} is {v:.3g}, within the borderline range [{reject_max:.3g}, {keep_min:.3g}), showing mixed signal."
-                    )
-            elif mode == "lower":
-                if v <= keep_max:
-                    parts.append(
-                        f"{feature} is {v:.3g}, stable and below the KEEP ceiling ({keep_max:.3g}), indicating acceptable level."
-                    )
-                elif v > reject_min:
-                    parts.append(
-                        f"{feature} is {v:.3g}, high and above the reject threshold ({reject_min:.3g}), indicating excess."
-                    )
-                else:
-                    parts.append(
-                        f"{feature} is {v:.3g}, elevated within the borderline zone ({keep_max:.3g}, {reject_min:.3g}]."
-                    )
-            else:
-                if keep_min <= v <= keep_max:
-                    parts.append(
-                        f"{feature} is {v:.3g}, within the KEEP band [{keep_min:.3g}, {keep_max:.3g}]."
-                    )
-                elif v < reject_min or v > reject_max:
-                    parts.append(
-                        f"{feature} is {v:.3g}, outside the acceptable range [{reject_min:.3g}, {reject_max:.3g}], indicating rejection."
-                    )
-                else:
-                    parts.append(
-                        f"{feature} is {v:.3g}, near a boundary zone, classifying as borderline."
-                    )
+        if isinstance(face_conf, (int, float)):
+            direction = "high" if float(face_conf) >= 0.80 else "low"
+            parts.append(f"face_confidence is {face_conf:.3g}, which is {direction}.")
+
+        if isinstance(motion, (int, float)):
+            direction = "stable" if float(motion) <= 0.25 else "elevated"
+            parts.append(f"motion_score is {motion:.3g}, {direction} for this clip.")
+
+        if isinstance(audio, (int, float)):
+            direction = "above the acceptable range" if float(audio) >= 20.0 else "below the acceptable range"
+            parts.append(f"audio_snr_db is {audio:.3g}, {direction}.")
+
+        if isinstance(lighting, (int, float)):
+            direction = "uniform" if float(lighting) >= 0.65 else "inconsistent"
+            parts.append(f"lighting_uniformity is {lighting:.3g}, {direction}.")
+
+        if isinstance(face_area, (int, float)):
+            direction = "adequate" if float(face_area) >= 0.25 else "small"
+            parts.append(f"face_area_ratio is {face_area:.3g}, {direction}.")
 
         if not parts:
-            # Last resort — use quality hint text as-is (already threshold-anchored)
-            return quality_hint if quality_hint else f"{label} — clip metadata analysis supports this classification."
+            return quality_hint if quality_hint else f"{label} — metadata analysis supports this classification."
 
-        return " ".join(parts)
+        combined = " ".join(parts)
+        if quality_hint:
+            combined = f"{combined} {quality_hint}"
+        return combined
 
     # ── ICL history for LLM prompts ────────────────────────────────────────────
 
@@ -364,15 +318,12 @@ class ClipQualityAgent:
         quality_hint: str = "",
     ) -> Dict:
         """
-        Produce a clip-quality action, enriched with ICL context and
-        grader-aligned reasoning.
+        Produce a clip-quality action from raw metadata and ICL context.
 
-        Parameters
-        ----------
-        task_id     : current task identifier
-        obs         : observation dict (model_dump of Observation)
-        icl_memory  : per-session ICL memory (None → no feedback loop)
-        quality_hint: pre-computed rubric-threshold hint text
+        The agent works purely from:
+          - clip_metadata features (no expected_label, no quality_cues)
+          - rubric_summary text (high-level human-readable description)
+          - ICL memory context (reward history — no ground truth)
         """
         clip = obs.get("clip_metadata", {})
         if isinstance(clip, dict):
@@ -380,22 +331,16 @@ class ClipQualityAgent:
         else:
             clip_dict = {}
 
-        # ── CRITICAL: strip expected_label so the agent cannot cheat ──────────
-        # The environment stores expected_label in clip metadata for grading,
-        # but the agent must NEVER see the answer.  It learns from the reward
-        # signal (label_score) only.
+        # Defensive: strip any residual GT fields that shouldn't be here
         clip_dict.pop("expected_label", None)
+        clip_dict.pop("quality_cues", None)
 
         clip_id = str(clip_dict.get("clip_id", ""))
         rubric_summary = obs.get("rubric_summary", "")
-        # rubric_thresholds injected into obs.info by env (see env.py update)
-        rubric_thresholds: dict[str, Any] = obs.get("info", {}).get("rubric_thresholds", {})
 
-        dominant_features = self._get_dominant_features(clip_dict, rubric_thresholds)
-
-        # ICL context from session memory
+        # ICL context from session memory (reward-signal-only, no GT)
         icl_context = (
-            icl_memory.get_context_text(clip_id, dominant_features)
+            icl_memory.get_context_text(clip_id)
             if icl_memory is not None
             else ""
         )
@@ -419,19 +364,17 @@ class ClipQualityAgent:
             if isinstance(parsed, dict):
                 return self.normalize_action(parsed, clip_dict)
 
-        # ── Heuristic + RL trial-and-error fallback ───────────────────────────
+        # ── Imperfect heuristic + ICL trial-and-error fallback ────────────────
         label = self._memory_guided_label(clip_dict, icl_memory)
-        reasoning = self._rl_reasoning(
-            clip_dict, dominant_features, label, rubric_thresholds, quality_hint
-        )
-        confidence = 0.85 if label != "BORDERLINE" else 0.70
+        reasoning = self._build_reasoning(clip_dict, label, quality_hint)
+        confidence = 0.70 if label != "BORDERLINE" else 0.55
 
-        # Boost confidence when memory shows this label scored well
+        # Boost confidence when memory confirms this label scored well
         if icl_memory is not None:
             clip_attempts = icl_memory.records.get(clip_id, [])
             for att in reversed(clip_attempts):
                 if str(att.get("label", "")).upper() == label and float(att.get("label_score", 0.0)) >= 0.55:
-                    confidence = min(confidence + 0.05, 0.95)
+                    confidence = min(confidence + 0.05, 0.90)
                     break
 
         return {
@@ -443,7 +386,7 @@ class ClipQualityAgent:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Episode runner (now ICL-RL aware)
+# Episode runner (ICL-RL aware)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_episode(
@@ -457,7 +400,7 @@ def run_episode(
 
     After every step the reward + clip context are written to icl_memory so
     subsequent steps (and subsequent episodes) benefit from the accumulated
-    feedback.
+    feedback.  Ground-truth labels are NOT passed to ICL memory.
     """
     env = ClipQualityEnvironment()
     agent = ClipQualityAgent(client, model_name)
@@ -478,11 +421,11 @@ def run_episode(
         clip_id_val = str(obs.clip_metadata.clip_id)
         clip_ids.append(clip_id_val)
 
-        # Build quality hint for this clip
+        # Build quality hint (uses ICL memory feedback, no GT)
         current_clip = obs.clip_metadata.model_dump()
         quality_hint = env.build_quality_hint(clip=dict(current_clip), icl_memory=icl_memory)
 
-        # Build observation dict (includes rubric_thresholds in info)
+        # Build observation dict — note: rubric_thresholds has been removed from obs.info
         obs_dict = obs.model_dump()
 
         action_dict = agent.act(task_id, obs_dict, icl_memory=icl_memory, quality_hint=quality_hint)
@@ -495,15 +438,13 @@ def run_episode(
         action_name = str(action.label)
         action_history.append(action_name)
 
-        # Write to ICL memory so next step can learn from this reward
-        expected = str(current_clip.get("expected_label", "")).upper() or None
+        # Write to ICL memory — reward signal only, NO expected_label
         raw_label_score = float(obs.info.get("label_score", 0.0))
         icl_memory.record(
             clip_id=clip_id_val,
             label=action_name,
             reward=reward,
             reasoning=str(action_dict.get("reasoning", "")),
-            expected_label=expected,
             episode=icl_memory.episode_count,
             step=step_num,
             label_score=raw_label_score,
