@@ -14,13 +14,15 @@ from openenv.core.env_server import create_fastapi_app
 
 import inference
 from clip_quality_env.icl_memory import ICLMemory
+from clip_quality_env.ground_truth import GTStore as _UIGTStore
+from clip_quality_env.rubric import RubricState as _UIRubricState
 from models import Action, Observation, TaskInfo
 from server.baseline_runs import baseline_run_tracker
 from server.environment import ClipQualityEnvironment
 from server.grader import grade
 from server.tasks import TASK_REGISTRY
 
-PRODUCT_NAME = "CLIP Quality Analyzer"
+PRODUCT_NAME = "ClipQualityEnv"
 ENVIRONMENT_ID = "clip_quality_env"
 OVERRIDDEN_ROUTES = {"/health", "/state", "/tasks", "/grader", "/baseline"}
 TASK_SURFACE_DESCRIPTIONS = {
@@ -511,6 +513,27 @@ def run_baseline_route(background_tasks: BackgroundTasks, task: str | None = Non
 
 
 def build_custom_ui() -> gr.Blocks:
+    # ── UI-only expected label lookup ──────────────────────────────────────
+    # This is used EXCLUSIVELY for the human-facing dashboard tables.
+    # It is completely isolated from the agent — the agent never calls this,
+    # the observation pipeline never uses it, and the grader is untouched.
+    _ui_gt = _UIGTStore()
+    _ui_rubric = _UIRubricState()
+
+    def _ui_expected_label(clip_id: str, clip: dict[str, Any] | None = None) -> str:
+        """Resolve the expected label for UI display only.
+
+        Checks GTStore first (human-assigned labels for hard clips),
+        then falls back to rubric.derive_label() for easy/medium clips.
+        This function is NEVER called by the agent or grader.
+        """
+        gt_label = _ui_gt.lookup(clip_id)
+        if gt_label:
+            return gt_label
+        if clip:
+            return _ui_rubric.derive_label(clip)
+        return "N/A"
+
     dominant_feature_columns = [
         "Feature Name",
         "Current Value",
@@ -543,10 +566,12 @@ def build_custom_ui() -> gr.Blocks:
         corpus_data = []
         for item in corpus_items:
             cid = item.get("clip_id", item.get("id", "N/A"))
+            # Look up expected label from UI-only GT + rubric (isolated from agent)
+            expected = _ui_expected_label(str(cid), clip=item)
             corpus_data.append(
                 {
                     "Clip ID": cid,
-                    "Expected Label": item.get("expected_label", "N/A"),
+                    "Expected Label": expected,
                     "Predicted Label": _predicted.get(str(cid), "—"),
                     "Current Review Status": item.get("review_status", "pending"),
                     "Face Confidence": item.get("face_confidence", "N/A"),
@@ -600,9 +625,8 @@ def build_custom_ui() -> gr.Blocks:
             clip_id = str(item.get("clip_id", "N/A"))
             submitted_raw = item.get("label", "")
             submitted = str(submitted_raw).upper() if submitted_raw is not None else ""
-            expected_raw = item.get("expected_label")
-            expected_normalized = str(expected_raw).strip().lower() if expected_raw is not None else ""
-            expected = "N/A" if expected_normalized in {"", "none", "null", "n/a"} else str(expected_raw).upper()
+            # Look up expected label from UI-only GT + rubric (isolated from agent)
+            expected = _ui_expected_label(clip_id)
             reward = float(item.get("reward", 0.0))
             rows.append(
                 {
@@ -852,7 +876,7 @@ def build_custom_ui() -> gr.Blocks:
         return labels
 
     with gr.Blocks(
-        title="CLIP Quality Analyzer: Judge's Console",
+        title="ClipQualityEnv — Talking-Head Clip Quality Assessment",
         theme=gr.themes.Soft(
             primary_hue="orange",
             font=gr.themes.GoogleFont("Source Sans Pro"),
@@ -869,9 +893,11 @@ def build_custom_ui() -> gr.Blocks:
         selected_tab_state = gr.State(value="easy")
         baseline_poll_timer = gr.Timer(value=1.0, active=False)
 
-        gr.HTML("<h2 style='text-align: center; color: #10b981;'>CLIP Quality Analyzer: Judge's Strategic Console</h2>")
+        gr.HTML("<h2 style='text-align: center; color: #10b981;'>ClipQualityEnv — Talking-Head Clip Quality Assessment</h2>")
         gr.Markdown(
-            "Welcome, Judge Agent. Use this console to identify data to policy gaps and propose measurable governance refinements."
+            "An RL environment for autonomous video-clip quality classification. "
+            "The agent learns to label talking-head clips as **KEEP**, **BORDERLINE**, or **REJECT** "
+            "using in-context reinforcement learning — no ground-truth labels are exposed to the agent."
         )
 
         with gr.Row():
@@ -936,7 +962,7 @@ def build_custom_ui() -> gr.Blocks:
             )
             learning_progress_table = gr.DataFrame(
                 label="Session Learning History",
-                headers=["Clip ID", "Runs", "Correct/Total", "Best Reward", "Latest Reward", "Best Label", "Expected", "Trend"],
+                headers=["Clip ID", "Runs", "Exact/Partial", "Best Reward", "Latest Reward", "Best Label", "Best label_score", "Trend"],
                 interactive=False,
             )
 
