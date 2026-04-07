@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -15,6 +16,35 @@ from .rubric import RubricState
 
 VALID_LABELS = {"KEEP", "BORDERLINE", "REJECT"}
 FEATURE_TOKEN_RE = re.compile(r"\b[a-z]+(?:_[a-z0-9]+)+\b")
+
+# ── Per-step difficulty ceiling ───────────────────────────────────────────────
+# The maximum total reward a single step can achieve, by difficulty.
+# This prevents the agent from ever scoring 1.00 on any individual step,
+# ensuring that even a "perfect" prediction caps below the theoretical max.
+DIFFICULTY_STEP_CEILING: dict[str, float] = {
+    "easy": 0.90,
+    "medium": 0.80,
+    "hard": 0.70,
+}
+
+# ── Reward noise ──────────────────────────────────────────────────────────────
+# Deterministic per-(clip_id, label) noise added to label_score.
+# Prevents the agent from using label_score >= 0.55 as a binary oracle.
+# The noise is seeded by a hash so it's reproducible but unpredictable to the agent.
+NOISE_AMPLITUDE = 0.08
+
+
+def _label_noise(clip_id: str, label: str) -> float:
+    """Deterministic noise in [-NOISE_AMPLITUDE, +NOISE_AMPLITUDE].
+
+    Seeded by hash(clip_id + label) so it's stable across runs for the
+    same (clip, label) pair, but the agent can't predict it.
+    """
+    key = f"{clip_id}::{label}".encode("utf-8")
+    digest = hashlib.sha256(key).hexdigest()
+    # Take 8 hex chars → 32-bit int → normalize to [0, 1] → shift to [-1, 1]
+    frac = int(digest[:8], 16) / 0xFFFFFFFF
+    return NOISE_AMPLITUDE * (2.0 * frac - 1.0)
 
 
 def _normalize_action(action: Action | dict[str, Any]) -> dict[str, Any]:
@@ -45,28 +75,35 @@ def _score_label(
     gt: GTStore,
     difficulty: str | None = None,
 ) -> float:
-    """Score the predicted label against ground truth.
+    """Score the predicted label against ground truth, with noise.
 
-    Difficulty affects partial-match credit:
-      Easy   → one tier off earns 0.25 (generous)
-      Medium → one tier off earns 0.15
-      Hard   → one tier off earns 0.05 (nearly penalised)
+    The raw score is:
+      Correct  → 0.60 + noise(clip_id, label)   (≈ 0.52–0.68)
+      Partial  → partial_base + noise            (varies by difficulty)
+      Wrong    → 0.00                            (no noise on total miss)
+
+    Noise prevents the agent from using a simple threshold to detect
+    whether a label is correct after a single trial.
     """
     clip_id = str(clip.get("clip_id", ""))
     gt_label = gt.lookup(clip_id)
     if gt_label is None:
         gt_label = rubric.derive_label(clip)
+
+    noise = _label_noise(clip_id, label)
+
     if label == gt_label:
-        return 0.60
-    # Partial credit: one tier off
-    # BORDERLINE ↔ KEEP or BORDERLINE ↔ REJECT counts as partial
+        return max(0.40, 0.60 + noise)  # floor at 0.40 so it's always > partial
+
+    # Partial credit: one tier off (BORDERLINE ↔ KEEP or BORDERLINE ↔ REJECT)
     # KEEP ↔ REJECT is a full-miss regardless of difficulty
     is_partial = (
         (gt_label == "BORDERLINE" and label in {"KEEP", "REJECT"})
         or (label == "BORDERLINE" and gt_label in {"KEEP", "REJECT"})
     )
     if is_partial:
-        return get_partial_label_score(difficulty)
+        base = get_partial_label_score(difficulty)
+        return max(0.0, base + noise * 0.5)  # half noise on partial
     return 0.0
 
 
@@ -83,26 +120,23 @@ def _contains_directional_cue(reasoning: str, feature: str, status: str) -> bool
     return any(w in text for w in ("borderline", "mixed", "ambiguous", "tradeoff", "conflict"))
 
 
-def _check_directional_reasoning(
+def _count_directional_matches(
     reasoning: str, clip: dict[str, Any], dominant_features: list[str], rubric: RubricState
-) -> bool:
+) -> int:
+    """Count how many dominant features have correct directional cues in the reasoning."""
     if not reasoning.strip():
-        return False
-    checks = 0
-    matches = 0
+        return 0
+    matched = 0
     for feature in dominant_features:
         if feature not in clip:
             continue
         value = clip[feature]
         if not isinstance(value, (int, float)):
             continue
-        checks += 1
         status = rubric.get_feature_status(feature, float(value))
         if _contains_directional_cue(reasoning, feature, status):
-            matches += 1
-    if checks == 0:
-        return False
-    return matches >= 1
+            matched += 1
+    return matched
 
 
 def _score_reasoning(
@@ -113,44 +147,61 @@ def _score_reasoning(
 ) -> float:
     """Score reasoning quality with difficulty-adjusted thresholds.
 
-    Easy:
-      +0.10 — mentions ≥1 dominant feature (lenient)
-      +0.10 — directional cue present (bonus, not required)
-      +0.10 — no hallucinated feature tokens
-    Medium:
-      +0.10 — mentions ≥2 dominant features (required)
-      +0.10 — directional cue required
-      +0.10 — no hallucinated feature tokens
-    Hard:
-      +0.10 — mentions ≥2 dominant features (required)
-      +0.10 — directional cue required
-      +0.10 — no hallucinated feature tokens AND directional cue matched on both features
+    All difficulties require ≥2 dominant feature mentions for full score.
+
+    Easy (max 0.30):
+      +0.10 — mentions ≥2 dominant features; +0.04 for 1 mention
+      +0.10 — directional cue on ≥1 feature; +0.03 for non-trivial text (>50 chars)
+      +0.10 — zero hallucinated feature tokens
+    Medium (max 0.30):
+      +0.10 — mentions ≥2 dominant features (required; 1 mention = +0.03)
+      +0.10 — directional cue on ≥1 feature (required)
+      +0.10 — zero hallucinated feature tokens
+    Hard (max 0.30):
+      +0.10 — mentions ≥2 dominant features (required; 1 mention = 0.00)
+      +0.10 — directional cue on ≥2 features (both must match)
+      +0.10 — zero hallucinated tokens AND reasoning length > 50 chars
     """
     score = 0.0
     lower_reasoning = reasoning.lower()
     dominant_features = rubric.get_dominant_features(clip)
 
-    feature_min = get_reasoning_feature_min(difficulty)
     needs_directional = requires_directional_cues(difficulty)
 
+    # ── Sub-score 1: Feature mentions ─────────────────────────────────────
     mentioned = sum(1 for f in dominant_features if f.lower() in lower_reasoning)
     if mentioned >= 2:
         score += 0.10
-    elif mentioned >= 1 and feature_min <= 1:
-        # Easy: one mention earns partial credit toward the 0.10 slot
-        score += 0.07
+    elif mentioned >= 1:
+        # Partial credit depends on difficulty
+        if difficulty == "hard":
+            score += 0.00  # hard: no credit for single mention
+        elif difficulty == "medium":
+            score += 0.03  # medium: minimal credit
+        else:
+            score += 0.04  # easy: small partial credit
 
-    # Directional cue check
-    has_directional = _check_directional_reasoning(reasoning, clip, dominant_features, rubric)
-    if has_directional:
-        score += 0.10
-    elif not needs_directional:
-        # Easy mode: award directional sub-score even without explicit cues
-        # if the reasoning text is non-trivial (>30 chars)
-        if len(reasoning.strip()) > 30:
-            score += 0.05
+    # ── Sub-score 2: Directional cues ─────────────────────────────────────
+    directional_matches = _count_directional_matches(reasoning, clip, dominant_features, rubric)
 
-    # Hallucination check — only count feature-style tokens as possible hallucinations
+    if difficulty == "hard":
+        # Hard requires directional match on BOTH dominant features
+        if directional_matches >= 2:
+            score += 0.10
+        elif directional_matches >= 1:
+            score += 0.03
+    elif needs_directional:
+        # Medium requires at least one directional match
+        if directional_matches >= 1:
+            score += 0.10
+    else:
+        # Easy: directional is a bonus
+        if directional_matches >= 1:
+            score += 0.10
+        elif len(reasoning.strip()) > 50:
+            score += 0.03  # non-trivial text earns a small bonus
+
+    # ── Sub-score 3: Hallucination + quality check ────────────────────────
     all_feature_names = {k.lower() for k in clip.keys()}
     hallucinated = [
         token
@@ -159,26 +210,17 @@ def _score_reasoning(
     ]
 
     if difficulty == "hard":
-        # Hard: no hallucinated tokens AND directional matched on ≥2 features
-        # requires more precise reasoning
-        checks_passed = 0
-        for feature in dominant_features:
-            if feature not in clip:
-                continue
-            value = clip[feature]
-            if not isinstance(value, (int, float)):
-                continue
-            status = rubric.get_feature_status(feature, float(value))
-            if _contains_directional_cue(reasoning, feature, status):
-                checks_passed += 1
-        if len(hallucinated) == 0 and checks_passed >= 2:
+        # Hard: zero hallucinations AND reasoning > 50 chars
+        if len(hallucinated) == 0 and len(reasoning.strip()) > 50:
             score += 0.10
-        elif len(hallucinated) == 0 and checks_passed >= 1:
-            score += 0.05
+        elif len(hallucinated) == 0:
+            score += 0.04
     else:
-        # Easy/Medium: zero hallucinated tokens earns this sub-score
+        # Easy/Medium: zero hallucinated tokens
         if len(hallucinated) == 0:
             score += 0.10
+        elif len(hallucinated) <= 1:
+            score += 0.04  # one minor hallucination is a small penalty
 
     return min(max(score, 0.0), 0.30)
 
@@ -191,11 +233,10 @@ def grade(
     difficulty: str | None = None,
 ) -> Reward:
     """
-    Fully deterministic reward decomposition with difficulty-proportional strictness.
-
-    Difficulty affects:
-      - label_score for partial matches (easy=0.25, medium=0.15, hard=0.05)
-      - reasoning_score requirements (easy=lenient, medium=strict, hard=strictest)
+    Reward decomposition with:
+      1. Difficulty-proportional strictness (partial label, reasoning thresholds)
+      2. Deterministic per-(clip, label) noise on label_score
+      3. Per-step ceiling by difficulty (easy=0.90, medium=0.80, hard=0.70)
     """
     payload = _normalize_action(action)
     label = str(payload["label"]).upper()
@@ -204,7 +245,12 @@ def grade(
     format_score = _score_format(payload)
     label_score = _score_label(label, clip, rubric, gt, difficulty=difficulty)
     reasoning_score = _score_reasoning(reasoning, clip, rubric, difficulty=difficulty)
-    total = format_score + label_score + reasoning_score
+    raw_total = format_score + label_score + reasoning_score
+
+    # Apply per-step difficulty ceiling
+    diff_key = str(difficulty or "easy").lower()
+    ceiling = DIFFICULTY_STEP_CEILING.get(diff_key, 1.0)
+    total = min(raw_total, ceiling)
 
     return Reward(
         total=round(min(max(total, 0.0), 1.0), 6),

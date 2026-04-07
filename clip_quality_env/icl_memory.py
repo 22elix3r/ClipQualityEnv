@@ -128,16 +128,13 @@ class ICLMemory:
         ]
 
         # Show up to last 3 attempts (label + label_score only, NO expected_label)
+        # NOTE: With reward noise, label_score for correct is ~0.52-0.68,
+        # for partial ~0.07-0.33, for wrong = 0.0.  We intentionally do NOT
+        # classify these as CORRECT/PARTIAL/WRONG — that would bypass the noise.
         for i, att in enumerate(attempts[-3:], start=max(1, n - 2)):
             ls = float(att.get("label_score", 0.0))
-            if ls >= 0.55:
-                grade_tag = "✓ CORRECT (label_score=0.60)"
-            elif ls >= 0.10:
-                grade_tag = f"~ PARTIAL (label_score={ls:.2f}, one tier off)"
-            else:
-                grade_tag = "✗ WRONG (label_score=0.00)"
             lines.append(
-                f"  Attempt {i}: label={att['label']}  reward={att['reward']:.3f}  {grade_tag}"
+                f"  Attempt {i}: label={att['label']}  reward={att['reward']:.3f}  label_score={ls:.2f}"
             )
 
         if best:
@@ -146,25 +143,26 @@ class ICLMemory:
                 f"  Best ever: label={best['label']}  reward={best['reward']:.3f}  label_score={best_ls:.2f}"
             )
 
-        # Directive based on label_score (reward-only, no answer reveal)
-        if last_ls >= 0.55:
+        # Directive based on label_score — use soft language, don't confirm correctness
+        if last_ls >= 0.40:
             directive = (
-                "Your label was CORRECT last time. Keep it. "
-                "Refine reasoning: name both dominant features by their exact "
-                "field name with directional comparisons (above/below threshold). "
-                "Ensure no hallucinated feature names."
+                f"Your last label ({last['label']}) appeared to score well "
+                f"(label_score={last_ls:.2f}). Consider keeping it but also "
+                f"consider alternatives — reward contains noise. "
+                f"Focus on reasoning: name both dominant features with directional "
+                f"comparisons. Ensure no hallucinated feature names."
             )
-        elif last_ls >= 0.10:
+        elif last_ls >= 0.05:
             directive = (
-                f"Your last label ({last['label']}) was PARTIALLY correct (one tier off). "
-                f"Try a different label this time — you are close but not exact. "
+                f"Your last label ({last['label']}) scored modestly "
+                f"(label_score={last_ls:.2f}). Consider trying a different label. "
                 f"Then name the two dominant features with directional language."
             )
         else:
             directive = (
-                f"Your last label ({last['label']}) was WRONG. "
-                f"Try a completely different label this time. "
-                f"Re-examine the rubric thresholds and feature values carefully, "
+                f"Your last label ({last['label']}) scored poorly "
+                f"(label_score={last_ls:.2f}). Try a different label. "
+                f"Re-examine the feature values and rubric carefully, "
                 f"then name the two dominant features with directional language."
             )
 
@@ -184,24 +182,25 @@ class ICLMemory:
         last = attempts[-1]
         ls = float(last.get("label_score", 0.0))
 
-        if ls >= 0.55:
-            # Label was correct — push for reasoning refinement only
+        if ls >= 0.40:
+            # Probably correct — but noise means we can't be sure from 1 sample
             return (
-                f"Your previous label ({last['label']}) scored well. Keep it. "
+                f"Your previous label ({last['label']}) scored well "
+                f"(label_score={ls:.2f}). Consider keeping it. "
                 f"Focus on strengthening reasoning: cite dominant features with "
-                f"exact values and directional comparisons against thresholds."
+                f"exact values and directional comparisons."
             )
-        elif ls >= 0.10:
-            # Partial match — one tier off
+        elif ls >= 0.05:
+            # Partial or noisy — might be one tier off
             return (
-                f"Previous label ({last['label']}) was partially correct (one tier off, "
-                f"label_score={ls:.2f}). Try a different label this time."
+                f"Previous label ({last['label']}) scored modestly "
+                f"(label_score={ls:.2f}). Consider trying a different label."
             )
         else:
-            # Completely wrong
+            # Clearly wrong
             return (
-                f"Previous label ({last['label']}) was incorrect (label_score={ls:.2f}). "
-                f"Try a different label. Re-examine rubric thresholds carefully."
+                f"Previous label ({last['label']}) scored poorly (label_score={ls:.2f}). "
+                f"Try a different label. Re-examine feature values carefully."
             )
 
     # ──────────────────────────────────────────────────
@@ -243,9 +242,10 @@ class ICLMemory:
             else:
                 trend = "— First run"
 
-            # Correctness inferred from label_score (>= 0.55 = exact match)
-            exact_count = sum(1 for ls in label_scores if ls >= 0.55)
-            partial_count = sum(1 for ls in label_scores if 0.10 <= ls < 0.55)
+            # Correctness inferred from label_score (noise-aware thresholds)
+            # Correct labels score ~0.52-0.68 (with noise), partial ~0.07-0.33
+            exact_count = sum(1 for ls in label_scores if ls >= 0.40)
+            partial_count = sum(1 for ls in label_scores if 0.05 <= ls < 0.40)
 
             rows.append(
                 {

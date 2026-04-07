@@ -3,15 +3,5 @@
   "clip_002": {"label": "BORDERLINE", "source": "seed", "episode": 0},
   "clip_003": {"label": "KEEP",       "source": "seed", "episode": 0},
   "clip_004": {"label": "REJECT",     "source": "seed", "episode": 0},
-  "clip_005": {"label": "KEEP",       "source": "seed", "episode": 0},
-  "clip_006": {"label": "REJECT",     "source": "seed", "episode": 0},
-  "clip_007": {"label": "REJECT",     "source": "seed", "episode": 0},
-  "clip_008": {"label": "KEEP",       "source": "seed", "episode": 0},
-  "clip_009": {"label": "BORDERLINE", "source": "seed", "episode": 0},
-  "clip_010": {"label": "KEEP",       "source": "seed", "episode": 0},
-  "clip_011": {"label": "KEEP",       "source": "seed", "episode": 0},
-  "clip_012": {"label": "KEEP",       "source": "seed", "episode": 0},
-  "clip_013": {"label": "KEEP",       "source": "seed", "episode": 0},
-  "clip_014": {"label": "REJECT",     "source": "seed", "episode": 0},
-  "clip_015": {"label": "BORDERLINE", "source": "seed", "episode": 0}
+  "clip_005": {"label": "KEEP",       "source": "seed", "episode": 0}
 }

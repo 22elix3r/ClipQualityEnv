@@ -184,18 +184,26 @@ class ClipQualityAgent:
         Select the best label using reward-based trial-and-error.
 
         The agent NEVER sees expected_label.  It learns purely from the raw
-        label_score returned by the grader after each attempt:
-          - label_score >= 0.55 → exact match (correct label)
-          - label_score >= 0.10 → partial match (one tier off)
-          - label_score == 0.00 → completely wrong
+        label_score returned by the grader after each attempt.
+
+        Due to reward noise (±0.08), label_score for a correct label ranges
+        from ~0.52 to ~0.68 depending on the clip/label hash.  This means
+        the agent cannot reliably determine correctness from a single trial.
 
         Strategy:
-        1. If any prior attempt scored >= 0.55 → use that label (it was correct).
-        2. If no winner yet, use heuristic if untried.
-        3. If heuristic was tried and failed, try untried labels systematically.
-        4. All 3 tried → return highest-scoring one.
+        1. Require ≥2 attempts with label_score >= 0.40 for the same label
+           before considering it "confirmed" (noise-resilient threshold).
+        2. Even with a confirmed label, explore an alternative 15% of the
+           time to prevent permanent lock-in.
+        3. If no confirmed label, try untried labels systematically.
+        4. All 3 tried → return the one with best average label_score.
         """
+        import hashlib as _hl
+
         ALL_LABELS = ["KEEP", "BORDERLINE", "REJECT"]
+        CONFIRM_THRESHOLD = 0.40   # noise can push correct down to ~0.52, partial up to ~0.33
+        CONFIRM_COUNT = 2          # need 2 high scores, not just 1
+        EXPLORE_RATE = 0.15        # 15% chance to deviate even from confirmed label
 
         if icl_memory is None:
             return self._heuristic_label(clip)
@@ -204,21 +212,40 @@ class ClipQualityAgent:
         if not attempts:
             return self._heuristic_label(clip)
 
-        # Build a map: label → best raw label_score achieved
-        label_scores: Dict[str, float] = {}
+        # Build per-label stats: count of high-scoring attempts + average label_score
+        label_high_counts: Dict[str, int] = {}
+        label_all_scores: Dict[str, list] = {}
         for att in attempts:
             lbl = str(att.get("label", "")).upper()
             ls = float(att.get("label_score", 0.0))
-            if lbl in ALL_LABELS:
-                label_scores[lbl] = max(label_scores.get(lbl, 0.0), ls)
+            if lbl not in ALL_LABELS:
+                continue
+            if lbl not in label_all_scores:
+                label_all_scores[lbl] = []
+            label_all_scores[lbl].append(ls)
+            if ls >= CONFIRM_THRESHOLD:
+                label_high_counts[lbl] = label_high_counts.get(lbl, 0) + 1
 
-        # Tier 1: any label scored >= 0.55 (exact match) → lock it in
-        for lbl, ls in label_scores.items():
-            if ls >= 0.55:
-                return lbl
+        # Tier 1: require ≥2 high-scoring attempts for same label (noise-resilient)
+        confirmed = [lbl for lbl, cnt in label_high_counts.items() if cnt >= CONFIRM_COUNT]
+
+        if confirmed:
+            best_confirmed = max(confirmed, key=lambda l: sum(label_all_scores.get(l, [0])) / max(len(label_all_scores.get(l, [1])), 1))
+
+            # Exploration: 15% chance to try something else even if confirmed
+            # Use deterministic pseudo-random based on clip_id + attempt count
+            explore_seed = f"{clip_id}::explore::{len(attempts)}".encode("utf-8")
+            explore_hash = int(_hl.sha256(explore_seed).hexdigest()[:8], 16) / 0xFFFFFFFF
+            if explore_hash < EXPLORE_RATE:
+                # Pick the least-tried label that isn't the confirmed one
+                alternatives = [l for l in ALL_LABELS if l != best_confirmed]
+                alternatives.sort(key=lambda l: len(label_all_scores.get(l, [])))
+                return alternatives[0]
+
+            return best_confirmed
 
         # Tier 2: find labels we haven't tried yet
-        tried = set(label_scores.keys())
+        tried = set(label_all_scores.keys())
         untried = [lbl for lbl in ALL_LABELS if lbl not in tried]
 
         if untried:
@@ -228,8 +255,10 @@ class ClipQualityAgent:
                 return heuristic_guess
             return untried[0]
 
-        # All 3 labels tried — return whichever scored highest
-        best_label = max(label_scores, key=lambda k: label_scores[k])
+
+        # All 3 labels tried — return whichever has highest average label_score
+        label_avg = {l: sum(s) / max(len(s), 1) for l, s in label_all_scores.items()}
+        best_label = max(label_avg, key=lambda k: label_avg[k])
         return best_label
 
     # ── Reasoning builder ─────────────────────────────────────────────────────
