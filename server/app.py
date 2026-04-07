@@ -517,16 +517,17 @@ def build_custom_ui() -> gr.Blocks:
         "Threshold Range",
     ]
     session_history_columns = ["Step", "Clip ID", "Submitted Label", "Expected Label", "Reward"]
+    corpus_columns = ["Clip ID", "Expected Label", "Predicted Label", "Current Review Status", "Face Confidence", "Motion Score", "Audio SNR (dB)"]
 
     def format_dominant_features(rows: list[dict[str, Any]]) -> pd.DataFrame:
         if not rows:
             return pd.DataFrame(columns=dominant_feature_columns)
         return pd.DataFrame(rows, columns=dominant_feature_columns)
 
-    def format_obs(obs: dict[str, Any]) -> tuple[pd.DataFrame, str, float, int, str, str]:
+    def format_obs(obs: dict[str, Any], predicted_labels: dict[str, str] | None = None) -> tuple[pd.DataFrame, str, float, int, str, str]:
         if not obs:
             return (
-                pd.DataFrame(columns=["Clip ID", "Expected Label", "Current Review Status", "Face Confidence", "Motion Score", "Audio SNR (dB)"]),
+                pd.DataFrame(columns=corpus_columns),
                 "### No Clip-Quality Rubric Available",
                 0.0,
                 5,
@@ -536,22 +537,23 @@ def build_custom_ui() -> gr.Blocks:
 
         corpus_items = list(obs.get("data_corpus", []))
         corpus_items.sort(key=lambda item: str(item.get("clip_id", item.get("id", ""))))
+        _predicted = predicted_labels or {}
 
         corpus_data = []
         for item in corpus_items:
+            cid = item.get("clip_id", item.get("id", "N/A"))
             corpus_data.append(
                 {
-                    "Clip ID": item.get("clip_id", item.get("id", "N/A")),
+                    "Clip ID": cid,
                     "Expected Label": item.get("expected_label", "N/A"),
+                    "Predicted Label": _predicted.get(str(cid), "—"),
                     "Current Review Status": item.get("review_status", "pending"),
                     "Face Confidence": item.get("face_confidence", "N/A"),
                     "Motion Score": item.get("motion_score", "N/A"),
                     "Audio SNR (dB)": item.get("audio_snr_db", "N/A"),
                 }
             )
-        df_corpus = pd.DataFrame(corpus_data) if corpus_data else pd.DataFrame(
-            columns=["Clip ID", "Expected Label", "Current Review Status", "Face Confidence", "Motion Score", "Audio SNR (dB)"]
-        )
+        df_corpus = pd.DataFrame(corpus_data) if corpus_data else pd.DataFrame(columns=corpus_columns)
 
         rubric_summary = obs.get("rubric_summary", "").strip()
         rule_md = "### Active Clip-Quality Rubric\n"
@@ -567,6 +569,23 @@ def build_custom_ui() -> gr.Blocks:
         total = int(obs.get("corpus_size", len(corpus_data)))
         corpus_stat = f"### Clip Queue: **{shown}** of **{total}** items displayed"
         return df_corpus, rule_md, best_score, steps_left, episode_id, corpus_stat
+
+    def _extract_baseline_predicted_labels(payload: dict[str, Any]) -> dict[str, str]:
+        """Extract per-clip predicted labels from baseline result detail."""
+        labels: dict[str, str] = {}
+        raw_results = payload.get("baseline_results") or []
+        # baseline_results may contain per-task detail including steps
+        # Each result item has task_id, and the episode ran EPISODE_STEPS steps.
+        # We store predicted labels from action_history where available.
+        for result in raw_results:
+            if not isinstance(result, dict):
+                continue
+            # action_history stores the string labels in step order
+            action_history = result.get("action_history") or []
+            task_label = str(result.get("task_id", ""))
+            for idx, lbl in enumerate(action_history):
+                labels[f"{task_label}:step{idx+1}"] = str(lbl).upper()
+        return labels
 
     def format_session_history(obs: dict[str, Any]) -> tuple[pd.DataFrame, str, str]:
         info = obs.get("info", {}) if isinstance(obs, dict) else {}
@@ -642,47 +661,60 @@ def build_custom_ui() -> gr.Blocks:
     def handle_step(
         env_state: ClipQualityEnvironment | None,
         task_id: str,
-        selected_input_tab: str,
-        easy_label: str,
         easy_observation: str,
-        medium_label: str,
         medium_primary_signal: str,
         medium_conflicting_signal: str,
         medium_reasoning: str,
-        hard_label: str,
         hard_tradeoff_summary: str,
         hard_confidence_justification: str,
         hard_confidence: float,
         clip_id: str,
     ):
+        """Execute Strategic Step: auto-generates quality hints then predicts labels for all clips."""
+        import copy as _copy
         env = _resolve_env(env_state)
-        if env.state.task_id != task_id:
+        if not env._episode_plan or env.state.task_id != task_id:
             env.reset(task_id=task_id)
-        label, reasoning, confidence = _resolve_tiered_submission(
-            task_id=task_id,
-            selected_input_tab=selected_input_tab,
-            easy_label=easy_label,
-            easy_observation=easy_observation,
-            medium_label=medium_label,
-            medium_primary_signal=medium_primary_signal,
-            medium_conflicting_signal=medium_conflicting_signal,
-            medium_reasoning=medium_reasoning,
-            hard_label=hard_label,
-            hard_tradeoff_summary=hard_tradeoff_summary,
-            hard_confidence_justification=hard_confidence_justification,
-            hard_confidence=hard_confidence,
-        )
-        payload: dict[str, Any] = {
-            "label": label,
-            "reasoning": reasoning,
-            "confidence": confidence,
-        }
-        if clip_id and clip_id.strip():
-            payload["clip_id"] = clip_id.strip()
 
-        obs_obj = env.step(Action.model_validate(payload))
-        obs = obs_obj.model_dump()
-        df, pol, score, steps, ep, stat = format_obs(obs)
+        # Build heuristic agent to predict labels with quality hints
+        _agent = inference.ClipQualityAgent(client=None, model=inference.DEFAULT_MODEL_NAME)
+
+        predicted_labels: dict[str, str] = {}
+        obs_dict: dict[str, Any] = {}
+        last_obs = None
+
+        # Run through all clips in the episode plan using auto quality hints
+        for step_idx in range(len(env._episode_plan)):
+            current_clip = env._episode_plan[env.state.step_count].clip if env.state.step_count < len(env._episode_plan) else env._episode_plan[-1].clip
+            clip_id_val = str(current_clip.get("clip_id", ""))
+
+            # Auto-generate quality hint for this clip
+            hint_text = env.build_quality_hint(clip=_copy.deepcopy(current_clip))
+
+            # Predict label using heuristic (with hint-enriched reasoning)
+            predicted = _agent._heuristic_label(current_clip)
+            reasoning = hint_text if hint_text else f"{predicted} based on clip metadata cues for {clip_id_val}."
+            confidence = 0.82 if predicted != "BORDERLINE" else 0.68
+
+            payload: dict[str, Any] = {
+                "label": predicted,
+                "reasoning": reasoning,
+                "confidence": confidence,
+                "clip_id": clip_id_val,
+            }
+            if clip_id and clip_id.strip() and step_idx == 0:
+                payload["clip_id"] = clip_id.strip()
+
+            obs_obj = env.step(Action.model_validate(payload))
+            last_obs = obs_obj
+            obs_dict = obs_obj.model_dump()
+            predicted_labels[clip_id_val] = predicted
+
+            if obs_obj.done:
+                break
+
+        obs = obs_dict
+        df, pol, score, steps, ep, stat = format_obs(obs, predicted_labels=predicted_labels)
         dominant_df = format_dominant_features(env.dominant_feature_rows())
         history_df, history_cues, history_total = format_session_history(obs)
         reward_msg = _reward_breakdown_markdown(obs, initialized=False)
@@ -728,6 +760,40 @@ def build_custom_ui() -> gr.Blocks:
             next_hard_tradeoff_summary = hint_text
 
         return env, next_easy_observation, next_medium_reasoning, next_hard_tradeoff_summary
+
+    def _baseline_predicted_labels_from_payload(payload: dict[str, Any], env: ClipQualityEnvironment | None) -> dict[str, str]:
+        """Build per clip_id predicted-label map from baseline result using clip_ids returned by run_episode."""
+        labels: dict[str, str] = {}
+        if env is None:
+            return labels
+        raw_results = (payload or {}).get("baseline_results") or []
+        for result in raw_results:
+            if not isinstance(result, dict):
+                continue
+            task_id_r = str(result.get("task_id", ""))
+            action_history = result.get("action_history") or []
+            clip_ids_list = result.get("clip_ids") or []
+            if clip_ids_list and action_history:
+                # Preferred: clip IDs returned directly from run_episode
+                for cid, lbl in zip(clip_ids_list, action_history):
+                    labels[str(cid)] = str(lbl).upper()
+            else:
+                # Fallback: match by corpus ordering
+                corpus = env._episode_corpus.get(task_id_r, [])
+                for idx, item in enumerate(corpus):
+                    clip_id_val = str(item.get("clip_id", item.get("id", "")))
+                    if idx < len(action_history):
+                        labels[clip_id_val] = str(action_history[idx]).upper()
+                    else:
+                        _agent = inference.ClipQualityAgent(client=None, model=inference.DEFAULT_MODEL_NAME)
+                        labels[clip_id_val] = _agent._heuristic_label(item)
+        # If no labels resolved, fall back to heuristic on all episode plan clips
+        if not labels and env._episode_plan:
+            _agent = inference.ClipQualityAgent(client=None, model=inference.DEFAULT_MODEL_NAME)
+            for ep_clip in env._episode_plan:
+                cid = str(ep_clip.clip.get("clip_id", ""))
+                labels[cid] = _agent._heuristic_label(ep_clip.clip)
+        return labels
 
     with gr.Blocks(
         title="CLIP Quality Analyzer: Judge's Console",
@@ -806,31 +872,20 @@ def build_custom_ui() -> gr.Blocks:
 
         gr.Markdown("---")
         gr.Markdown("### Propose Strategic Refinement")
+        gr.Markdown(
+            "_Click **Execute Strategic Step** to auto-generate quality hints for all clips and predict labels automatically. "
+            "Use **Load Quality Hint** (optional) to manually preview the hint for the current clip before running._"
+        )
         with gr.Group():
             with gr.Tabs(selected="easy") as tiered_input_tabs:
                 with gr.Tab("Easy: Definition Refining", id="easy"):
-                    easy_label_input = gr.Radio(
-                        choices=CLASS_LABEL_CHOICES,
-                        value="BORDERLINE",
-                        label="Predicted Label",
-                    )
-                    easy_observation_input = gr.Textbox(label="Key Observation", lines=2)
+                    easy_observation_input = gr.Textbox(label="Key Observation (auto-filled by quality hint)", lines=2, placeholder="Auto-generated or manually entered hint for the current clip.")
                 with gr.Tab("Medium: Gap Detection", id="medium"):
-                    medium_label_input = gr.Radio(
-                        choices=CLASS_LABEL_CHOICES,
-                        value="BORDERLINE",
-                        label="Predicted Label",
-                    )
                     medium_primary_signal_input = gr.Textbox(label="Primary Signal", lines=1)
                     medium_conflicting_signal_input = gr.Textbox(label="Conflicting Signal", lines=1)
-                    medium_reasoning_input = gr.TextArea(label="Reasoning", lines=4)
+                    medium_reasoning_input = gr.TextArea(label="Reasoning (auto-filled by quality hint)", lines=4, placeholder="Auto-generated or manually entered reasoning.")
                 with gr.Tab("Hard: Full System Evolution", id="hard"):
-                    hard_label_input = gr.Radio(
-                        choices=CLASS_LABEL_CHOICES,
-                        value="BORDERLINE",
-                        label="Predicted Label",
-                    )
-                    hard_tradeoff_summary_input = gr.TextArea(label="Trade-off Summary", lines=4)
+                    hard_tradeoff_summary_input = gr.TextArea(label="Trade-off Summary (auto-filled by quality hint)", lines=4, placeholder="Auto-generated or manually entered trade-off summary.")
                     with gr.Row():
                         hard_confidence_justification_input = gr.TextArea(label="Confidence Justification", lines=3, scale=2)
                         hard_confidence_input = gr.Slider(
@@ -841,7 +896,7 @@ def build_custom_ui() -> gr.Blocks:
                             label="Confidence",
                             scale=1
                         )
-            
+
             clip_id_input = gr.Textbox(label="Clip ID override (optional)")
             hint_btn = gr.Button(QUALITY_HINT_BUTTON_LABEL, variant="secondary")
 
@@ -885,14 +940,10 @@ def build_custom_ui() -> gr.Blocks:
             inputs=[
                 env_state,
                 task_id,
-                selected_tab_state,
-                easy_label_input,
                 easy_observation_input,
-                medium_label_input,
                 medium_primary_signal_input,
                 medium_conflicting_signal_input,
                 medium_reasoning_input,
-                hard_label_input,
                 hard_tradeoff_summary_input,
                 hard_confidence_justification_input,
                 hard_confidence_input,
@@ -931,15 +982,45 @@ def build_custom_ui() -> gr.Blocks:
                 hard_tradeoff_summary_input,
             ],
         )
+        def _start_baseline_with_corpus(task_id_val: str, env_st: ClipQualityEnvironment | None):
+            run_id, status_md, result_md, btn_upd, timer_upd = _start_baseline_ui_run(task_id_val)
+            return run_id, status_md, result_md, btn_upd, timer_upd, env_st, gr.update()
+
+        def _poll_baseline_with_corpus(
+            run_id: str | None,
+            env_st: ClipQualityEnvironment | None,
+            current_corpus_df: pd.DataFrame | None,
+        ):
+            run_id_out, status_md, result_md, btn_upd, timer_upd = _poll_baseline_ui_run(run_id)
+            # When complete, compute predicted labels and update corpus table
+            if run_id_out is None and env_st is not None:
+                payload: dict[str, Any] = {}
+                if run_id:
+                    from server.baseline_runs import baseline_run_tracker as _brt
+                    run = _brt.get_run(run_id)
+                    if run and run["status"] == "completed":
+                        payload = run["result"] or {}
+                pred_labels = _baseline_predicted_labels_from_payload(payload, env_st)
+                if pred_labels and current_corpus_df is not None and not current_corpus_df.empty:
+                    df_upd = current_corpus_df.copy()
+                    if "Predicted Label" not in df_upd.columns:
+                        df_upd["Predicted Label"] = "—"
+                    for idx, row in df_upd.iterrows():
+                        cid = str(row.get("Clip ID", ""))
+                        if cid in pred_labels:
+                            df_upd.at[idx, "Predicted Label"] = pred_labels[cid]
+                    return run_id_out, status_md, result_md, btn_upd, timer_upd, env_st, gr.update(value=df_upd)
+            return run_id_out, status_md, result_md, btn_upd, timer_upd, env_st, gr.update()
+
         baseline_run_btn.click(
-            _start_baseline_ui_run,
-            inputs=[task_id],
-            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer],
+            _start_baseline_with_corpus,
+            inputs=[task_id, env_state],
+            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer, env_state, corpus_table],
         )
         baseline_poll_timer.tick(
-            _poll_baseline_ui_run,
-            inputs=[baseline_run_id_state],
-            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer],
+            _poll_baseline_with_corpus,
+            inputs=[baseline_run_id_state, env_state, corpus_table],
+            outputs=[baseline_run_id_state, baseline_status_disp, baseline_result_md, baseline_run_btn, baseline_poll_timer, env_state, corpus_table],
         )
 
     return demo

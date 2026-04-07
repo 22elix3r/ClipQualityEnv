@@ -152,8 +152,11 @@ def run_episode(task_id: str, client: OpenAI | None, model_name: str) -> Dict:
     obs = env.reset(task_id=task_id)
     step_num = 0
     rewards: list[float] = []
+    action_history: list[str] = []
+    clip_ids: list[str] = []
     for _ in range(int(obs.max_steps)):
         step_num += 1
+        clip_ids.append(str(obs.clip_metadata.clip_id))
         action_dict = agent.act(task_id, obs.model_dump())
         action_dict.setdefault("clip_id", obs.clip_metadata.clip_id)
         action = Action.model_validate(action_dict)
@@ -162,6 +165,7 @@ def run_episode(task_id: str, client: OpenAI | None, model_name: str) -> Dict:
         done = bool(obs.done)
         rewards.append(reward)
         action_name = str(action.label)
+        action_history.append(action_name)
         print(f"[STEP] step={step_num} label={action_name} reward={reward:.2f} done={str(done).lower()} error=null", flush=True)
         if done:
             break
@@ -184,6 +188,8 @@ def run_episode(task_id: str, client: OpenAI | None, model_name: str) -> Dict:
         "steps": step_num,
         "success": success,
         "mode": mode,
+        "action_history": action_history,
+        "clip_ids": clip_ids,
     }
 
 
