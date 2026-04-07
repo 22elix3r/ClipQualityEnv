@@ -1,0 +1,4 @@
+opencv-python-headless>=4.10.0
+mediapipe>=0.10.0
+openai-whisper>=20231117
+numpy>=1.26.0

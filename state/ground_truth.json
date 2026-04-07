@@ -1,0 +1,198 @@
+{
+  "clip_0001": {
+    "confidence": null,
+    "episode": 0,
+    "label": "KEEP",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0002": {
+    "confidence": null,
+    "episode": 0,
+    "label": "KEEP",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0003": {
+    "confidence": null,
+    "episode": 0,
+    "label": "KEEP",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0004": {
+    "confidence": null,
+    "episode": 0,
+    "label": "KEEP",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0005": {
+    "confidence": null,
+    "episode": 0,
+    "label": "KEEP",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0006": {
+    "confidence": null,
+    "episode": 0,
+    "label": "KEEP",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0007": {
+    "confidence": null,
+    "episode": 0,
+    "label": "BORDERLINE",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0008": {
+    "confidence": null,
+    "episode": 0,
+    "label": "BORDERLINE",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0009": {
+    "confidence": null,
+    "episode": 0,
+    "label": "BORDERLINE",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0010": {
+    "confidence": null,
+    "episode": 0,
+    "label": "BORDERLINE",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0011": {
+    "confidence": null,
+    "episode": 0,
+    "label": "BORDERLINE",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0012": {
+    "confidence": null,
+    "episode": 0,
+    "label": "BORDERLINE",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0013": {
+    "confidence": null,
+    "episode": 0,
+    "label": "BORDERLINE",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0014": {
+    "confidence": null,
+    "episode": 0,
+    "label": "REJECT",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0015": {
+    "confidence": null,
+    "episode": 0,
+    "label": "REJECT",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0016": {
+    "confidence": null,
+    "episode": 0,
+    "label": "REJECT",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0017": {
+    "confidence": null,
+    "episode": 0,
+    "label": "REJECT",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0018": {
+    "confidence": null,
+    "episode": 0,
+    "label": "REJECT",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0019": {
+    "confidence": null,
+    "episode": 0,
+    "label": "REJECT",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_002": {
+    "confidence": 0.82,
+    "episode": 1,
+    "label": "REJECT",
+    "reward": 0.85,
+    "source": "agent_promoted"
+  },
+  "clip_0020": {
+    "confidence": null,
+    "episode": 0,
+    "label": "REJECT",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_003": {
+    "confidence": 0.82,
+    "episode": 1,
+    "label": "REJECT",
+    "reward": 0.85,
+    "source": "agent_promoted"
+  },
+  "clip_004": {
+    "confidence": 0.82,
+    "episode": 1,
+    "label": "REJECT",
+    "reward": 0.85,
+    "source": "agent_promoted"
+  },
+  "clip_008": {
+    "confidence": 0.85,
+    "episode": 21,
+    "label": "REJECT",
+    "reward": 0.856,
+    "source": "agent_promoted"
+  },
+  "clip_010": {
+    "confidence": 0.96,
+    "episode": 9,
+    "label": "REJECT",
+    "reward": 0.95,
+    "source": "agent_promoted"
+  },
+  "clip_012": {
+    "confidence": 0.82,
+    "episode": 1,
+    "label": "REJECT",
+    "reward": 0.95,
+    "source": "agent_promoted"
+  },
+  "clip_019": {
+    "confidence": 0.82,
+    "episode": 1,
+    "label": "KEEP",
+    "reward": 0.95,
+    "source": "agent_promoted"
+  },
+  "clip_020": {
+    "confidence": 0.82,
+    "episode": 1,
+    "label": "REJECT",
+    "reward": 0.95,
+    "source": "agent_promoted"
+  }
+}

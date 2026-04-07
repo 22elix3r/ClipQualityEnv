@@ -1,0 +1,16 @@
+spec_version: 1
+name: clip_quality_env
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+description: >
+  CLIP Quality Analyzer environment with OpenEnv reference structure for
+  clip-case review, quality-rule refinement, and deterministic scoring.
+tags:
+  - openenv
+  - reinforcement-learning
+  - clip-quality
+  - quality-analysis
+  - clip-review
+  - hackathon-2026
