@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from clip_quality_env.difficulty import calibrate_total_score, normalize_difficulty
+
 from clip_quality_env.grader import grade as clip_grade
 from clip_quality_env.ground_truth import GTStore
 from clip_quality_env.models import Action
@@ -124,10 +124,7 @@ def grade(action_dict: dict[str, Any], task_id: str, temperature: float = 0.0, s
         reasoning_score = float(reward.reasoning_score)
 
         reasoning_score = min(0.30, reasoning_score + _cue_bonus(str(action.reasoning), clip))
-        task = TASK_REGISTRY.get(task_id, {})
-        difficulty = normalize_difficulty(str(task.get("difficulty", "")))
         total = _clamp01(format_score + label_score + reasoning_score)
-        total = calibrate_total_score(total, difficulty=difficulty)
         return round(total, 4)
     except Exception:
         return 0.0

@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .difficulty import calibrate_total_score
 from .ground_truth import GTStore
 from .models import Action, Reward
 from .rubric import RubricState
@@ -122,7 +121,6 @@ def grade(
     label_score = _score_label(label, clip, rubric, gt)
     reasoning_score = _score_reasoning(reasoning, clip, rubric)
     total = format_score + label_score + reasoning_score
-    total = calibrate_total_score(total, difficulty=difficulty)
 
     return Reward(
         total=round(min(max(total, 0.0), 1.0), 6),
