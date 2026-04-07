@@ -98,7 +98,7 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
 
         for clip in corpus:
             clip.setdefault("clip_id", clip.get("id", str(uuid.uuid4())))
-            if "expected_label" not in clip:
+            if not clip.get("expected_label"):
                 clip["expected_label"] = self._rubric.derive_label(clip)
             clip["review_status"] = str(clip.get("review_status", "pending")).lower()
 
