@@ -136,6 +136,12 @@ class State(BaseModel):
     actions_taken: List[str] = Field(default_factory=list)
     episode_history: List[EpisodeHistoryItem] = Field(default_factory=list)
     rubric_thresholds: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    # Multi-episode curriculum tracking
+    curriculum_level: str = Field(default="easy", description="Current curriculum difficulty level")
+    curriculum_history: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-episode performance history for curriculum decisions",
+    )
 
 
 EnvironmentState = State

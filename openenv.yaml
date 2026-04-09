@@ -7,6 +7,21 @@ port: 8000
 description: >
   CLIP Quality Analyzer environment with OpenEnv reference structure for
   clip-case review, quality-rule refinement, and deterministic scoring.
+tasks:
+  - task_easy
+  - task_medium
+  - task_hard
+grader:
+  endpoint: /grader
+  deterministic: true
+  score_range: [0.0, 1.0]
+baseline:
+  script: inference.py
+  command: "PYTHONPATH=. python inference.py"
+  expected_scores:
+    task_easy: 0.84
+    task_medium: 0.63
+    task_hard: 0.42
 tags:
   - openenv
   - reinforcement-learning

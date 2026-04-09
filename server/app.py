@@ -24,7 +24,7 @@ from server.tasks import TASK_REGISTRY
 
 PRODUCT_NAME = "ClipQualityEnv"
 ENVIRONMENT_ID = "clip_quality_env"
-OVERRIDDEN_ROUTES = {"/health", "/state", "/tasks", "/grader", "/baseline"}
+OVERRIDDEN_ROUTES = {"/health", "/state", "/tasks", "/grader", "/baseline", "/metadata"}
 TASK_SURFACE_DESCRIPTIONS = {
     "task_easy": "Classify clips with clear quality signals and concise metadata-based reasoning.",
     "task_medium": "Classify borderline clips by balancing mixed quality indicators.",
@@ -165,6 +165,44 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "clip-quality-api"}
 
 
+@app.get("/metadata")
+def metadata() -> dict[str, Any]:
+    readme_content: str | None = None
+    readme_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "README.md")
+    if os.path.isfile(readme_path):
+        try:
+            with open(readme_path, "r", encoding="utf-8") as fh:
+                readme_content = fh.read()
+        except OSError:
+            pass
+    return {
+        "name": "ClipQualityEnvironment",
+        "description": (
+            "RL environment for autonomous talking-head video clip quality classification. "
+            "Agents learn to label clips as KEEP / BORDERLINE / REJECT using in-context "
+            "reinforcement learning with a deterministic reward-decomposed grader."
+        ),
+        "version": "1.1.0",
+        "author": "elix3r",
+        "readme_content": readme_content,
+        "documentation_url": "https://huggingface.co/spaces/elix3r/clip-quality-env",
+        "tasks": list(TASK_REGISTRY.keys()) + ["task_mixed"],
+        "curriculum": {
+            "enabled": True,
+            "promote_threshold": 0.75,
+            "demote_threshold": 0.35,
+            "window_size": 2,
+            "difficulty_order": ["easy", "medium", "hard", "mixed"],
+        },
+        "grader": {
+            "endpoint": "/grader",
+            "deterministic": True,
+            "score_range": [0.0, 1.0],
+            "components": ["format_score", "label_score", "reasoning_score"],
+        },
+    }
+
+
 @app.get("/state")
 def get_state() -> dict[str, Any]:
     env = ClipQualityEnvironment()
@@ -176,7 +214,7 @@ def get_state() -> dict[str, Any]:
 
 @app.get("/tasks")
 def list_tasks() -> list[TaskInfo]:
-    return [
+    tasks = [
         TaskInfo(
             task_id=task_id,
             difficulty=task["difficulty"],
@@ -185,6 +223,16 @@ def list_tasks() -> list[TaskInfo]:
         )
         for task_id, task in TASK_REGISTRY.items()
     ]
+    # Add the virtual mixed-difficulty task
+    tasks.append(
+        TaskInfo(
+            task_id="task_mixed",
+            difficulty="mixed",
+            description="Mixed-difficulty episode: progressive difficulty escalation from easy through hard within a single episode.",
+            action_schema=Action.model_json_schema(),
+        )
+    )
+    return tasks
 
 
 @app.post("/grader")
@@ -540,7 +588,7 @@ def build_custom_ui() -> gr.Blocks:
         "Rubric Status",
         "Threshold Range",
     ]
-    session_history_columns = ["Step", "Clip ID", "Submitted Label", "Expected Label", "Reward"]
+    session_history_columns = ["Step", "Difficulty", "Clip ID", "Submitted Label", "Expected Label", "Reward"]
     corpus_columns = ["Clip ID", "Expected Label", "Predicted Label", "Current Review Status", "Face Confidence", "Motion Score", "Audio SNR (dB)"]
 
     def format_dominant_features(rows: list[dict[str, Any]]) -> pd.DataFrame:
@@ -620,6 +668,9 @@ def build_custom_ui() -> gr.Blocks:
         rows: list[dict[str, Any]] = []
         cue_lines: list[str] = []
 
+        # Get difficulty trend for per-step badges
+        difficulty_trend = info.get("difficulty_trend", [])
+
         for idx, item in enumerate(session_history, start=1):
             step = int(item.get("step", idx))
             clip_id = str(item.get("clip_id", "N/A"))
@@ -628,9 +679,11 @@ def build_custom_ui() -> gr.Blocks:
             # Look up expected label from UI-only GT + rubric (isolated from agent)
             expected = _ui_expected_label(clip_id)
             reward = float(item.get("reward", 0.0))
+            difficulty = str(item.get("difficulty", difficulty_trend[idx - 1] if idx - 1 < len(difficulty_trend) else ""))
             rows.append(
                 {
                     "Step": step,
+                    "Difficulty": difficulty,
                     "Clip ID": clip_id,
                     "Submitted Label": submitted,
                     "Expected Label": expected,
@@ -643,7 +696,12 @@ def build_custom_ui() -> gr.Blocks:
                 if is_match
                 else "<span style='color:#c62828; font-weight:700;'>Mismatch</span>"
             )
-            cue_lines.append(f"- Step {step} (`{clip_id}`): {badge}")
+            diff_badge = {
+                "easy": "[E]",
+                "medium": "[M]",
+                "hard": "[H]",
+            }.get(difficulty, "[?]")
+            cue_lines.append(f"- Step {step} {diff_badge} (`{clip_id}`): {badge}")
 
         history_df = (
             pd.DataFrame(rows, columns=session_history_columns)
@@ -651,6 +709,22 @@ def build_custom_ui() -> gr.Blocks:
             else pd.DataFrame(columns=session_history_columns)
         )
         history_cues_md = "### Match Results\n" + "\n".join(cue_lines) if cue_lines else "### Match Results\n_No actions yet._"
+
+        # Add curriculum info
+        curriculum_level = info.get("curriculum_level", "easy")
+        cumulative_accuracy = info.get("cumulative_accuracy", 0.0)
+        curriculum_history = info.get("curriculum_history", [])
+
+        if session_history:
+            level_tag = {"easy": "Easy", "medium": "Medium", "hard": "Hard", "mixed": "Mixed"}.get(curriculum_level, "Unknown")
+            history_cues_md += f"\n\n### Progression\n"
+            history_cues_md += f"- **Curriculum Level:** {level_tag}\n"
+            history_cues_md += f"- **Episode Accuracy:** {cumulative_accuracy:.0%}\n"
+            if difficulty_trend:
+                trend_labels = [{
+                    "easy": "E", "medium": "M", "hard": "H",
+                }.get(d, "?") for d in difficulty_trend]
+                history_cues_md += f"- **Difficulty Trend:** {' > '.join(trend_labels)}\n"
 
         total_reward = float(info.get("total_reward", 0.0))
         total_color = "#2e7d32" if total_reward > 0 else "#c62828" if total_reward < 0 else "#374151"
@@ -678,6 +752,28 @@ def build_custom_ui() -> gr.Blocks:
             return pd.DataFrame(columns=learning_columns)
         return pd.DataFrame(rows, columns=learning_columns)
 
+    def _curriculum_info_markdown(env: ClipQualityEnvironment) -> str:
+        """Build the curriculum progress markdown from environment state."""
+        level = env._curriculum_level
+        history = env._curriculum_history
+        level_display = level.title()
+        lines = [f"### Current Level: {level_display}"]
+        if history:
+            lines.append("")
+            lines.append("| Episode | Task | Difficulty | Avg Reward | Accuracy |")
+            lines.append("|---------|------|------------|------------|----------|")
+            for h in history[-5:]:
+                lines.append(
+                    f"| {h.get('episode', '?')} "
+                    f"| {h.get('task_id', '?')} "
+                    f"| {h.get('difficulty', '?')} "
+                    f"| {h.get('avg_reward', 0):.3f} "
+                    f"| {h.get('accuracy', 0):.0%} |"
+                )
+        else:
+            lines.append("_Complete episodes to see curriculum progression._")
+        return "\n".join(lines)
+
 
     def handle_reset(env_state: ClipQualityEnvironment | None, task_id: str):
         env = _resolve_env(env_state)
@@ -686,6 +782,7 @@ def build_custom_ui() -> gr.Blocks:
         dominant_df = format_dominant_features(env.dominant_feature_rows())
         history_df, history_cues, history_total = format_session_history(obs)
         reward_msg = _reward_breakdown_markdown(obs, initialized=True)
+        curriculum_md = _curriculum_info_markdown(env)
         return (
             env,
             df,
@@ -700,6 +797,7 @@ def build_custom_ui() -> gr.Blocks:
             history_cues,
             history_total,
             json.dumps(obs, indent=2),
+            curriculum_md,
         )
 
     def handle_step(
@@ -794,6 +892,7 @@ def build_custom_ui() -> gr.Blocks:
         history_df, history_cues, history_total = format_session_history(obs)
         reward_msg = _reward_breakdown_markdown(obs, initialized=False)
         learning_df = _learning_progress_df(icl_mem)
+        curriculum_md = _curriculum_info_markdown(env)
         return (
             env,
             df,
@@ -810,6 +909,7 @@ def build_custom_ui() -> gr.Blocks:
             json.dumps(obs, indent=2),
             icl_mem,
             learning_df,
+            curriculum_md,
         )
 
     def handle_quality_hint(
@@ -911,7 +1011,11 @@ def build_custom_ui() -> gr.Blocks:
                 reward_outcome_disp = gr.Markdown("### Awaiting Scenario...")
                 
                 with gr.Group():
-                    task_id = gr.Dropdown(choices=list(TASK_REGISTRY.keys()), value="task_easy", label="Deployment Scenario")
+                    task_id = gr.Dropdown(
+                        choices=list(TASK_REGISTRY.keys()) + ["task_mixed"],
+                        value="task_easy",
+                        label="Deployment Scenario",
+                    )
                     reset_btn = gr.Button("Initialize Scenario", variant="secondary")
 
             with gr.Column(scale=3):
@@ -954,7 +1058,7 @@ def build_custom_ui() -> gr.Blocks:
                 )
 
         gr.Markdown("---")
-        with gr.Accordion("📈 ICL Learning Progress", open=False):
+        with gr.Accordion("ICL Learning Progress", open=False):
             gr.Markdown(
                 "_Per-clip reward history accumulated in this session. "
                 "Each time you run Execute Strategic Step or the Baseline Agent, "
@@ -964,6 +1068,17 @@ def build_custom_ui() -> gr.Blocks:
                 label="Session Learning History",
                 headers=["Clip ID", "Runs", "Exact/Partial", "Best Reward", "Latest Reward", "Best Label", "Best label_score", "Trend"],
                 interactive=False,
+            )
+
+        with gr.Accordion("Curriculum Progress", open=False):
+            gr.Markdown(
+                "_Track the agent's progression through difficulty levels. "
+                "The curriculum auto-promotes when average reward exceeds 0.75 for 2 consecutive episodes, "
+                "and demotes when it drops below 0.35. Progress: Easy → Medium → Hard → Mixed._"
+            )
+            curriculum_info_md = gr.Markdown(
+                "### Current Level: Easy\n"
+                "_Complete episodes to see curriculum progression._"
             )
 
         gr.Markdown("---")
@@ -1029,6 +1144,7 @@ def build_custom_ui() -> gr.Blocks:
                 session_history_cues,
                 session_total_reward,
                 raw_json_box,
+                curriculum_info_md,
             ],
         )
         step_btn.click(
@@ -1062,6 +1178,7 @@ def build_custom_ui() -> gr.Blocks:
                 raw_json_box,
                 icl_memory_state,
                 learning_progress_table,
+                curriculum_info_md,
             ],
         )
         hint_btn.click(

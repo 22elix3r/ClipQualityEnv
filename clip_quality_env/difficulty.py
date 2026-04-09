@@ -47,6 +47,16 @@ DIFFICULTY_REQUIRES_DIRECTIONAL: Final[dict[str, bool]] = {
     "hard": True,    # must include directional cue AND no hallucinated features
 }
 
+# Per-step score bands.  Scores are clamped to [0.0, ceiling] by the grader.
+# Bands intentionally overlap at the low end — a bad action on any difficulty
+# can score 0.0.  The ceiling decreases with difficulty so that a perfect
+# action on hard is inherently worth less than on easy.
+DIFFICULTY_TOTAL_BANDS: Final[dict[str, tuple[float, float]]] = {
+    "easy": (0.0, 0.90),
+    "medium": (0.0, 0.80),
+    "hard": (0.0, 0.70),
+}
+
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))

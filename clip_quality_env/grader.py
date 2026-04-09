@@ -225,6 +225,32 @@ def _score_reasoning(
     return min(max(score, 0.0), 0.30)
 
 
+def _confidence_calibration(
+    confidence: float,
+    label_correct: bool,
+    label_partial: bool,
+) -> float:
+    """Confidence calibration adjustment.
+
+    Rewards well-calibrated confidence:
+      - High confidence (≥0.8) + correct  → +0.03 bonus
+      - High confidence (≥0.8) + wrong    → -0.05 penalty
+      - Low confidence (≤0.3) + correct   → -0.02 (slightly penalise under-confidence)
+      - Otherwise                         → 0.00
+
+    This encourages agents to be confident when right and cautious when uncertain.
+    """
+    if confidence >= 0.80:
+        if label_correct:
+            return 0.03
+        if not label_partial:
+            return -0.05  # full miss with high confidence = penalty
+        return -0.02  # partial with high confidence = small penalty
+    if confidence <= 0.30 and label_correct:
+        return -0.02  # under-confident on correct answer
+    return 0.0
+
+
 def grade(
     action: Action | dict[str, Any],
     clip: dict[str, Any],
@@ -237,15 +263,30 @@ def grade(
       1. Difficulty-proportional strictness (partial label, reasoning thresholds)
       2. Deterministic per-(clip, label) noise on label_score
       3. Per-step ceiling by difficulty (easy=0.90, medium=0.80, hard=0.70)
+      4. Confidence calibration bonus/penalty for well-calibrated predictions
     """
     payload = _normalize_action(action)
     label = str(payload["label"]).upper()
     reasoning = str(payload["reasoning"])
+    confidence = float(payload.get("confidence", 0.5))
 
     format_score = _score_format(payload)
     label_score = _score_label(label, clip, rubric, gt, difficulty=difficulty)
     reasoning_score = _score_reasoning(reasoning, clip, rubric, difficulty=difficulty)
-    raw_total = format_score + label_score + reasoning_score
+
+    # Determine label correctness for confidence calibration
+    clip_id = str(clip.get("clip_id", ""))
+    gt_label = gt.lookup(clip_id)
+    if gt_label is None:
+        gt_label = rubric.derive_label(clip)
+    label_correct = (label == gt_label)
+    label_partial = (
+        (gt_label == "BORDERLINE" and label in {"KEEP", "REJECT"})
+        or (label == "BORDERLINE" and gt_label in {"KEEP", "REJECT"})
+    )
+
+    calibration_adj = _confidence_calibration(confidence, label_correct, label_partial)
+    raw_total = format_score + label_score + reasoning_score + calibration_adj
 
     # Apply per-step difficulty ceiling
     diff_key = str(difficulty or "easy").lower()

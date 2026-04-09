@@ -86,11 +86,26 @@ class GTStore:
     def get_promoted_clip_ids(self) -> list[str]:
         return [clip_id for clip_id, rec in self.records.items() if rec.get("source") == "agent_promoted"]
 
-    def try_promote(self, step3_result: dict[str, Any], episode: int) -> bool:
-        """
-        Promote hard-step clip if reward/confidence threshold is met.
+    # Difficulty-aware promotion thresholds:
+    # Hard tasks cap at 0.70 per step, so requiring 0.85 is impossible.
+    PROMOTION_THRESHOLDS: dict[str, tuple[float, float]] = {
+        "easy":   (0.85, 0.80),   # (min_reward, min_confidence)
+        "medium": (0.75, 0.80),
+        "hard":   (0.65, 0.80),
+    }
 
-        The optional `expected_label` key enforces that the promoted label is correct.
+    def try_promote(
+        self,
+        step3_result: dict[str, Any],
+        episode: int,
+        difficulty: str = "easy",
+    ) -> bool:
+        """
+        Promote clip if reward/confidence threshold is met for the given difficulty.
+
+        The optional ``expected_label`` key enforces that the promoted label is correct.
+        Thresholds are difficulty-aware: hard tasks have lower reward requirements
+        because per-step ceilings limit achievable scores.
         """
         clip = step3_result.get("clip", {})
         action = step3_result.get("action", {})
@@ -109,7 +124,11 @@ class GTStore:
 
         if label not in VALID_LABELS:
             return False
-        if reward < 0.85 or confidence < 0.80:
+
+        min_reward, min_confidence = self.PROMOTION_THRESHOLDS.get(
+            difficulty, self.PROMOTION_THRESHOLDS["easy"]
+        )
+        if reward < min_reward or confidence < min_confidence:
             return False
         if expected_label in VALID_LABELS and label != expected_label:
             return False

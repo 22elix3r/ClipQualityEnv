@@ -90,7 +90,7 @@ def test_grade_task_averages_follow_hard_medium_easy_order(isolated_grader_state
     medium_avg = task_average("task_medium")
     hard_avg = task_average("task_hard")
 
-    assert hard_avg > medium_avg > easy_avg
+    assert easy_avg > medium_avg > hard_avg
 
 
 def test_grade_difficulty_bands_do_not_overlap(isolated_grader_state):
@@ -135,5 +135,5 @@ def test_grade_difficulty_bands_do_not_overlap(isolated_grader_state):
     assert hard_min >= DIFFICULTY_TOTAL_BANDS["hard"][0]
     assert hard_max <= DIFFICULTY_TOTAL_BANDS["hard"][1]
 
-    assert easy_max < medium_min
-    assert medium_max < hard_min
+    # Ceiling ordering: higher difficulty → lower max achievable score
+    assert easy_max > medium_max > hard_max

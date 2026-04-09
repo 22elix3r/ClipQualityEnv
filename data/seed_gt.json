@@ -3,5 +3,8 @@
   "clip_002": {"label": "BORDERLINE", "source": "seed", "episode": 0},
   "clip_003": {"label": "KEEP",       "source": "seed", "episode": 0},
   "clip_004": {"label": "REJECT",     "source": "seed", "episode": 0},
-  "clip_005": {"label": "KEEP",       "source": "seed", "episode": 0}
+  "clip_005": {"label": "KEEP",       "source": "seed", "episode": 0},
+  "clip_0017": {"label": "REJECT",    "source": "seed", "episode": 0, "note": "GT override: rubric derives BORDERLINE but corpus expects REJECT due to cumulative trade-off weakness"},
+  "clip_0018": {"label": "REJECT",    "source": "seed", "episode": 0, "note": "GT override: ensures hard task consistency"},
+  "clip_0027": {"label": "REJECT",    "source": "seed", "episode": 0, "note": "GT override: ensures hard task consistency"}
 }

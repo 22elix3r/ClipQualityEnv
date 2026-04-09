@@ -20,6 +20,23 @@ from server.tasks import TASK_REGISTRY
 EPISODE_STEPS = 5
 DEFAULT_REAL_CLIPS_MANIFEST = "data/real_clips_manifest.jsonl"
 
+# Mixed-difficulty episode layout: how many clips from each difficulty
+MIXED_DIFFICULTY_PLAN: list[str] = ["easy", "easy", "medium", "medium", "hard"]
+
+# Curriculum auto-promotion/demotion thresholds
+# (min_avg_reward_over_N_episodes, N_episodes_required)
+CURRICULUM_PROMOTE_THRESHOLD = 0.75   # average reward to promote
+CURRICULUM_DEMOTE_THRESHOLD = 0.35    # average reward to demote
+CURRICULUM_WINDOW = 2                 # number of episodes to consider
+DIFFICULTY_ORDER = ["easy", "medium", "hard", "mixed"]
+
+# Mapping from difficulty label to task_id
+DIFFICULTY_TO_TASK: dict[str, str] = {
+    "easy": "task_easy",
+    "medium": "task_medium",
+    "hard": "task_hard",
+}
+
 
 @dataclass
 class EpisodeClip:
@@ -57,6 +74,9 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
         self._manifest_warning = ""
         self._manifest_path = os.environ.get("REAL_CLIPS_MANIFEST", DEFAULT_REAL_CLIPS_MANIFEST)
         self._real_clip_pools = self._load_real_clip_pools()
+        # Cross-episode curriculum state (persists across resets)
+        self._curriculum_level = "easy"
+        self._curriculum_history: list[dict[str, Any]] = []
 
     def _load_real_clip_pools(self) -> dict[str, list[dict[str, Any]]]:
         if not os.path.exists(self._manifest_path):
@@ -76,7 +96,8 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
 
     def _choose_tasks(self, seed: int | None = None, task_id: str | None = None) -> list[str]:
         if task_id is not None:
-            if task_id not in TASK_REGISTRY:
+            # Allow "task_mixed" even though it's not in TASK_REGISTRY
+            if task_id != "task_mixed" and task_id not in TASK_REGISTRY:
                 raise KeyError(f"Unknown task_id: {task_id}")
             return [task_id]
         rng = random.Random(seed)
@@ -106,28 +127,84 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
         corpus.sort(key=lambda item: str(item.get("clip_id", item.get("id", ""))))
         return corpus
 
-    def _sample_episode_clips(self, corpus: list[dict[str, Any]], seed: int | None = None) -> list[dict[str, Any]]:
+    def _sample_episode_clips(
+        self,
+        corpus: list[dict[str, Any]],
+        count: int = EPISODE_STEPS,
+        seed: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Sample `count` clips from corpus using a deterministic seed.
+
+        The corpus is sorted by clip_id before sampling to guarantee that
+        the same seed always produces the same episode regardless of
+        insertion order.
+        """
         if not corpus:
             raise ValueError("Cannot sample episode clips from an empty corpus")
+        # Sort for deterministic ordering before RNG sampling
+        stable_corpus = sorted(corpus, key=lambda c: str(c.get("clip_id", "")))
         rng = random.Random(seed)
-        if len(corpus) >= EPISODE_STEPS:
-            return [copy.deepcopy(clip) for clip in rng.sample(corpus, k=EPISODE_STEPS)]
+        if len(stable_corpus) >= count:
+            return [copy.deepcopy(clip) for clip in rng.sample(stable_corpus, k=count)]
 
-        pool = [copy.deepcopy(clip) for clip in corpus]
+        pool = [copy.deepcopy(clip) for clip in stable_corpus]
         rng.shuffle(pool)
         sampled: list[dict[str, Any]] = []
-        while len(sampled) < EPISODE_STEPS:
+        while len(sampled) < count:
             sampled.append(copy.deepcopy(pool[len(sampled) % len(pool)]))
         return sampled
+
+    def _build_mixed_episode(
+        self,
+        seed: int | None = None,
+    ) -> tuple[list[EpisodeClip], dict[str, list[dict[str, Any]]]]:
+        """Build a mixed-difficulty episode: 2 easy + 2 medium + 1 hard.
+
+        Creates progressive difficulty within a single episode.
+        """
+        rng = random.Random(seed)
+        plan: list[EpisodeClip] = []
+        corpus_map: dict[str, list[dict[str, Any]]] = {}
+
+        # Count how many clips needed per difficulty
+        from collections import Counter
+        diff_counts = Counter(MIXED_DIFFICULTY_PLAN)
+
+        for diff_level, count in diff_counts.items():
+            task_id = DIFFICULTY_TO_TASK.get(diff_level, f"task_{diff_level}")
+            if task_id not in TASK_REGISTRY:
+                continue
+            corpus = self._load_task_corpus(task_id)
+            corpus_map[task_id] = corpus
+            # Use a sub-seed derived from the main seed for per-difficulty sampling
+            sub_seed = rng.randint(0, 2**31) if seed is not None else None
+            sampled = self._sample_episode_clips(corpus, count=count, seed=sub_seed)
+            for clip in sampled:
+                plan.append(EpisodeClip(task_id=task_id, difficulty=diff_level, clip=clip))
+
+        # Sort plan by difficulty order for progressive escalation
+        diff_order = {d: i for i, d in enumerate(DIFFICULTY_ORDER)}
+        plan.sort(key=lambda ep: diff_order.get(ep.difficulty, 99))
+        return plan, corpus_map
 
     def _sample_episode_plan(
         self,
         task_ids: list[str],
         seed: int | None = None,
     ) -> tuple[list[EpisodeClip], dict[str, list[dict[str, Any]]]]:
+        """Build episode plan for the given task.
+
+        If task_id is 'task_mixed', builds a mixed-difficulty episode.
+        Otherwise samples from a single task corpus.
+        """
         if len(task_ids) != 1:
             raise ValueError("Episode planning expects exactly one task id")
         task_id = task_ids[0]
+
+        # Mixed-difficulty episode
+        if task_id == "task_mixed":
+            return self._build_mixed_episode(seed=seed)
+
         task = TASK_REGISTRY[task_id]
         difficulty = str(task.get("difficulty", ""))
         corpus = self._load_task_corpus(task_id)
@@ -338,7 +415,7 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
             done=done,
             info={
                 "difficulty": current.difficulty,
-                "task_description": TASK_REGISTRY[current.task_id]["description"],
+                "task_description": TASK_REGISTRY.get(current.task_id, {}).get("description", ""),
                 "best_score": self._persistent_best_score,
                 "last_reward": float(reward),
                 "action_history": self._state.actions_taken,
@@ -351,11 +428,55 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
                 "reward_total": float(self._last_reward_breakdown["total_reward"]),
                 "session_history": session_history,
                 "corpus_source": self._corpus_source,
+                # ── Step-level progression info ──────────────────────────
+                "difficulty_trend": [ep.difficulty for ep in self._episode_plan],
+                "cumulative_accuracy": self._compute_cumulative_accuracy(),
+                "curriculum_level": self._curriculum_level,
+                "curriculum_history": self._curriculum_history[-5:],  # last 5 episodes
                 # rubric_thresholds intentionally OMITTED — exposing the grader's
                 # internal threshold values lets the agent reconstruct the exact
                 # decision function and achieve perfect scores trivially.
             },
         )
+
+    def _compute_cumulative_accuracy(self) -> float:
+        """Fraction of correct predictions so far in this episode."""
+        if not self._state.episode_history:
+            return 0.0
+        correct = sum(1 for h in self._state.episode_history if h.label == h.expected_label)
+        return round(correct / len(self._state.episode_history), 4)
+
+    def _update_curriculum(self, episode_avg_reward: float) -> None:
+        """Auto-promote or demote difficulty based on rolling episode performance.
+
+        Promotion:  avg reward > CURRICULUM_PROMOTE_THRESHOLD for CURRICULUM_WINDOW episodes → next difficulty
+        Demotion:   avg reward < CURRICULUM_DEMOTE_THRESHOLD for CURRICULUM_WINDOW episodes → previous difficulty
+        """
+        self._curriculum_history.append({
+            "episode": self._state.episode_count,
+            "task_id": self._state.task_id,
+            "difficulty": self._curriculum_level,
+            "avg_reward": round(episode_avg_reward, 4),
+            "accuracy": self._compute_cumulative_accuracy(),
+        })
+
+        # Only consider recent episodes at the current difficulty level
+        current_level = self._curriculum_level
+        recent = [
+            h for h in self._curriculum_history[-CURRICULUM_WINDOW * 2:]
+            if h["difficulty"] == current_level
+        ][-CURRICULUM_WINDOW:]
+
+        if len(recent) < CURRICULUM_WINDOW:
+            return
+
+        avg = sum(h["avg_reward"] for h in recent) / len(recent)
+        idx = DIFFICULTY_ORDER.index(current_level) if current_level in DIFFICULTY_ORDER else 0
+
+        if avg >= CURRICULUM_PROMOTE_THRESHOLD and idx < len(DIFFICULTY_ORDER) - 1:
+            self._curriculum_level = DIFFICULTY_ORDER[idx + 1]
+        elif avg <= CURRICULUM_DEMOTE_THRESHOLD and idx > 0:
+            self._curriculum_level = DIFFICULTY_ORDER[idx - 1]
 
     def reset(
         self,
@@ -364,6 +485,14 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
         **kwargs: Any,
     ) -> Observation:
         task_id = kwargs.get("task_id")
+
+        # Auto-curriculum: if no task_id specified and curriculum mode,
+        # use the current curriculum level to pick the task
+        if task_id is None and kwargs.get("curriculum", False):
+            task_id = DIFFICULTY_TO_TASK.get(self._curriculum_level, "task_easy")
+            if self._curriculum_level == "mixed":
+                task_id = "task_mixed"
+
         task_ids = self._choose_tasks(seed=seed, task_id=task_id)
         self._episode_plan, self._episode_corpus = self._sample_episode_plan(task_ids, seed=seed)
         self._last_reward_breakdown = {
@@ -372,10 +501,13 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
             "reasoning_score": 0.0,
             "total_reward": 0.0,
         }
+        # Preserve cross-episode state
+        prev_episode_count = self._state.episode_count
+        prev_curriculum_history = self._state.curriculum_history
         self._state = State(
             episode_id=episode_id or str(uuid.uuid4()),
             task_id=self._episode_plan[0].task_id,
-            episode_count=self._state.episode_count + 1,
+            episode_count=prev_episode_count + 1,
             step_count=0,
             max_steps=len(self._episode_plan),
             current_score=0.0,
@@ -387,6 +519,8 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
             actions_taken=[],
             episode_history=[],
             rubric_thresholds=self._rubric.get_thresholds_summary(),
+            curriculum_level=self._curriculum_level,
+            curriculum_history=prev_curriculum_history,
         )
         obs = self._state_to_observation(reward=0.0, done=False)
         if self._manifest_warning:
@@ -462,24 +596,50 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
                 "expected_label": self._episode_plan[-1].clip.get("expected_label"),
             }
             try:
-                gt_promoted = self._gt_store.try_promote(step3_result, episode=self._state.episode_count)
+                current_difficulty = self._state.task_id.replace("task_", "") if self._state.task_id else "easy"
+                gt_promoted = self._gt_store.try_promote(
+                    step3_result,
+                    episode=self._state.episode_count,
+                    difficulty=current_difficulty,
+                )
             except ValueError:
                 gt_promoted = False
             self._state.gt_size = self._gt_store.size()
-            if hard_entry.reward >= 0.85:
-                self._rubric.recalibrate(
-                    perf=type("Perf", (), {"easy_accuracy": 0.0, "medium_accuracy": 0.0, "hard_accuracy": 0.86})(),
-                    current_episode=self._state.episode_count,
-                )
+
+            # Compute actual episode accuracy for recalibration
+            correct_count = sum(
+                1 for h in self._state.episode_history
+                if h.label == h.expected_label
+            )
+            episode_accuracy = correct_count / max(len(self._state.episode_history), 1)
+
+            # Build real performance object for recalibration —
+            # place accuracy on the dimension matching current difficulty
+            perf_kwargs = {"easy_accuracy": 0.0, "medium_accuracy": 0.0, "hard_accuracy": 0.0}
+            if current_difficulty in perf_kwargs:
+                perf_kwargs[f"{current_difficulty}_accuracy"] = episode_accuracy
+            self._rubric.recalibrate(
+                perf=type("Perf", (), perf_kwargs)(),
+                current_episode=self._state.episode_count,
+            )
             self._state.rubric_version = self._rubric.version
             self._state.rubric_thresholds = self._rubric.get_thresholds_summary()
+            # Update multi-episode curriculum tracking
+            episode_avg_reward = float(self._state.total_reward) / max(1, self._state.max_steps)
+            self._update_curriculum(episode_avg_reward)
+            self._state.curriculum_level = self._curriculum_level
+            self._state.curriculum_history = self._curriculum_history
+
             obs = self._state_to_observation(reward=reward, done=True)
             obs.info["gt_promoted"] = bool(gt_promoted)
             obs.info["episode_summary"] = {
                 "steps_completed": self._state.step_count,
                 "max_steps": self._state.max_steps,
                 "total_reward": round(float(self._state.total_reward), 4),
-                "average_reward": round(float(self._state.total_reward) / max(1, self._state.max_steps), 4),
+                "average_reward": round(episode_avg_reward, 4),
+                "accuracy": self._compute_cumulative_accuracy(),
+                "curriculum_level": self._curriculum_level,
+                "curriculum_promoted": self._curriculum_level != current_difficulty,
             }
             if self._manifest_warning:
                 obs.info["warning"] = self._manifest_warning
