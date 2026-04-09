@@ -1,2 +1,0 @@
-clip_quality_env
-server
