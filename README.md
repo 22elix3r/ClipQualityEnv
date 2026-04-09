@@ -17,7 +17,7 @@ tags:
 
 # ClipQualityEnv
 
-An OpenEnv-compliant reinforcement learning environment for curating high-quality talking-head video clips intended for **Audio-Visual (AV) LoRA fine-tuning**. The agent learns to classify clips as KEEP, BORDERLINE, or REJECT by evaluating per-clip metadata against a versioned quality rubric, ensuring only the cleanest, most training-appropriate clips make it into a LoRA dataset.
+An OpenEnv-compliant reinforcement learning environment for curating high-quality talking-head video clips intended for Audio-Visual (AV) LoRA fine-tuning. The agent learns to classify clips as KEEP, BORDERLINE, or REJECT by evaluating per-clip metadata against a versioned quality rubric, ensuring only the cleanest, most training-appropriate clips make it into a LoRA dataset.
 
 ## Reference Model
 
@@ -31,28 +31,76 @@ While training the LTX 2.3 AV LoRA adapter for talking-head video generation, I 
 
 Manually reviewing hundreds of clips takes a long time and your eye gets tired. You end up with inconsistent standards across a large dataset and no good way to audit the decisions you made earlier. The quality bar shifts depending on how tired you are.
 
-ClipQualityEnv came out of that experience. The idea was to turn what I learned during that LoRA training run into a structured, programmable rubric and then teach an agent to apply it consistently. Instead of a human eyeballing clips, an LLM agent evaluates each clip's extracted metadata including face confidence, head pose, audio SNR, motion score, lighting uniformity and more, then produces a graded KEEP / BORDERLINE / REJECT decision. The agent learns from a reward signal tied to a human-authored ground-truth store, improving its classification accuracy through in-context reinforcement learning without any weight updates.
+ClipQualityEnv came out of that experience. The idea was to turn what I learned during that LoRA training run into a structured, programmable rubric and then teach an agent to apply it consistently. Instead of a human eyeballing clips, an LLM agent evaluates each clip's extracted metadata (face confidence, head pose, audio SNR, motion score, lighting uniformity, and more), then produces a graded KEEP / BORDERLINE / REJECT decision. The agent learns from a reward signal tied to a human-authored ground-truth store, improving its classification accuracy through in-context reinforcement learning without any weight updates.
 
 **Only KEEP-labelled clips are passed downstream to the LoRA training pipeline.**
 
 ## What it does
 
-The environment presents an LLM agent with a 5-step episode. Each step shows one clip's metadata, a quality rubric, and the agent's prior prediction history for that clip. The agent classifies the clip and receives a structured reward signal broken down into three components:
+The environment presents an LLM agent with a 5-step episode. Each step shows one clip's metadata, a quality rubric, and the agent's prior prediction history for that clip. The agent classifies the clip and receives a structured reward signal broken down into four components:
 
 - **Format score** (max 0.10): validates that the label, reasoning, and confidence are all well-formed
-- **Label score** (max 0.60): checks label correctness against ground truth or rubric-derived labels, scaled by difficulty
+- **Label score** (max 0.68): checks label correctness against ground truth or rubric-derived labels, scaled by difficulty
 - **Reasoning score** (max 0.30): checks that the reasoning mentions dominant features with directional language and contains no hallucinated feature names
+- **Calibration adjustment** (+/- 0.05): rewards well-calibrated confidence (bonus for correct + confident predictions, penalty for overconfident errors)
 
 Difficulty-proportional ceilings make sure the agent cannot trivially reach perfect scores. Easy tasks cap at 0.90, medium at 0.80, and hard at 0.70 per step.
+
+## Key Features
+
+### Mixed-Difficulty Episodes
+
+The `task_mixed` mode builds a single episode that transitions across difficulty levels: 2 easy clips, followed by 2 medium clips, followed by 1 hard clip. This progressive escalation within a single episode tests the agent's ability to adapt its strategy as signal quality degrades.
+
+### Multi-Episode Curriculum
+
+The environment tracks cross-episode performance and automatically promotes or demotes the agent through difficulty levels:
+
+- **Promotion**: if the agent's average reward exceeds 0.75 for 2 consecutive episodes at the current level, difficulty increases
+- **Demotion**: if the average reward drops below 0.35 for 2 consecutive episodes, difficulty decreases
+- **Progression order**: Easy > Medium > Hard > Mixed
+
+Enable curriculum mode by passing `curriculum=True` to `reset()`. The environment will automatically select the appropriate task based on the agent's current level.
+
+### Seeded Determinism
+
+Passing `seed=N` to `reset()` guarantees an identical clip sequence every time. The corpus is sorted by clip_id before sampling, so insertion order cannot affect the result. The same seed with the same task always produces the exact same episode.
+
+### Step-Level Progression Tracking
+
+Each observation includes real-time progression metadata:
+
+| Field | Description |
+|---|---|
+| `difficulty_trend` | List of difficulty labels for all steps in the episode |
+| `cumulative_accuracy` | Fraction of correct predictions so far |
+| `curriculum_level` | Current difficulty level in the curriculum |
+| `curriculum_history` | Last 5 episodes of performance history |
+
+### Confidence Calibration
+
+The fourth reward dimension evaluates whether the agent's confidence matches its actual accuracy. A correct prediction with high confidence earns a bonus. An incorrect prediction with high confidence incurs a penalty. This prevents the agent from defaulting to maximum or minimum confidence on every prediction.
+
+### Difficulty-Aware GT Promotion
+
+Ground-truth promotion thresholds are scaled by difficulty:
+
+| Difficulty | Reward Threshold | Confidence Threshold |
+|---|---|---|
+| Easy | 0.85 | 0.80 |
+| Medium | 0.75 | 0.80 |
+| Hard | 0.65 | 0.75 |
+
+This ensures hard tasks (which have lower reward ceilings) can still contribute to GT expansion.
 
 ## Architecture
 
 ```
 clip_quality_env/
-  env.py             # OpenEnv environment, episode management, GT promotion
-  grader.py          # Deterministic reward decomposition (format + label + reasoning)
+  env.py             # OpenEnv environment, episode management, GT promotion, curriculum
+  grader.py          # Deterministic reward decomposition (format + label + reasoning + calibration)
   rubric.py          # Versioned threshold definitions and feature status logic
-  ground_truth.py    # Append-only GT store with agent-promotion support
+  ground_truth.py    # Append-only GT store with difficulty-aware promotion
   icl_memory.py      # Per-session ICL memory, context injection, hint feedback
   agent.py           # Lightweight LLM agent (XML tag parser, used in standalone mode)
   difficulty.py      # Difficulty normalization utilities
@@ -97,7 +145,7 @@ Each clip observation exposes the following fields:
 
 The rubric defines per-feature thresholds with three modes: `higher` (feature should be above threshold to KEEP), `lower` (feature should be below threshold to KEEP), and `band` (feature should fall within a range to KEEP). The rubric is versioned and can tighten automatically over time as the agent's accuracy on easy and medium tasks improves.
 
-Labels are derived from the rubric when no explicit ground truth exists. An agent-predicted label can be promoted into the ground truth store if it achieves reward >= 0.85 and confidence >= 0.80 and matches any existing expected label.
+Labels are derived from the rubric when no explicit ground truth exists. An agent-predicted label can be promoted into the ground truth store if it meets difficulty-specific reward and confidence thresholds and matches any existing expected label.
 
 ## In-Context Learning
 
@@ -116,6 +164,9 @@ The memory never reveals the expected label. All feedback is based on the reward
 | `task_easy` | Easy | Clear, unambiguous quality signals across most features |
 | `task_medium` | Medium | Mixed indicators requiring trade-off reasoning |
 | `task_hard` | Hard | Conflicting signals with no dominant clear indicator |
+| `task_mixed` | Mixed | Progressive difficulty: 2 easy, 2 medium, 1 hard |
+
+Each task corpus contains 8+ clips with balanced label distributions across KEEP, BORDERLINE, and REJECT.
 
 ## API Endpoints
 
@@ -131,7 +182,7 @@ The memory never reveals the expected label. All feedback is based on the reward
 | `GET` | `/baseline` | Alias for baseline start (GET-compatible) |
 | `POST` | `/reset` | Reset the environment to a new episode |
 | `POST` | `/step` | Submit one action and advance the episode |
-| `GET` | `/metadata` | OpenEnv environment metadata |
+| `GET` | `/metadata` | OpenEnv environment metadata (includes curriculum config) |
 | `GET` | `/schema` | OpenEnv action/observation schema |
 | `GET` | `/dashboard/` | Gradio interactive dashboard |
 
@@ -151,13 +202,16 @@ The `/grader` endpoint accepts the same action schema as `/step`:
 The Gradio dashboard at `/dashboard/` provides a full interactive session:
 
 - Difficulty-tiered input tabs (Easy, Medium, Hard) with structured reasoning fields
+- Task selector dropdown including the mixed-difficulty mode
 - Live clip corpus queue sorted by clip ID with predicted and expected labels
 - Dominant feature table showing closest-boundary features and their rubric status
-- Reward breakdown cards for format, label, and reasoning scores after each submission
-- Session history table with submitted vs expected labels and per-step rewards
-- Learning progress panel tracking reward trends across ICL runs per clip
-- "Load Quality Hint" button that generates a pre-filled hint from rubric thresholds for the current clip
-- "Run LLM Baseline Agent" button that runs the full ICL-RL agent in a background thread with async polling
+- Reward breakdown cards for format, label, reasoning, and calibration scores
+- Session history table with difficulty column, submitted vs expected labels, and per-step rewards
+- Match results with difficulty badges ([E], [M], [H]) and progression summary
+- Curriculum progress panel with level display and episode history table
+- ICL learning progress panel tracking reward trends across runs per clip
+- "Load Quality Hint" button that generates a pre-filled hint from rubric thresholds
+- "Run LLM Baseline Agent" button that runs the full ICL-RL agent in a background thread
 
 ## Local Setup
 
@@ -203,6 +257,12 @@ Run a single task:
 PYTHONPATH=. python inference.py task_easy
 ```
 
+Run the mixed-difficulty task:
+
+```bash
+PYTHONPATH=. python inference.py task_mixed
+```
+
 Output format (`--output json` for machine-readable):
 
 ```
@@ -235,6 +295,12 @@ docker run -p 8000:8000 -e HF_TOKEN=your_token clip-quality-env
 The project is deployed as a Hugging Face Space using the Docker SDK. The `openenv.yaml` and HuggingFace Space frontmatter in this file configure the deployment.
 
 ```bash
+openenv push --repo-id elix3r/clip-quality-env
+```
+
+Or manually:
+
+```bash
 git remote add hf-space https://huggingface.co/spaces/your-username/ClipQualityEnv
 git push hf-space main
 ```
@@ -250,6 +316,10 @@ git push hf-space main
 - `numpy >= 1.26.0`: Numerical operations in extraction pipeline
 - `pandas >= 2.0.0`: DataFrame rendering in the dashboard
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for task creation guidelines, grading invariants, and development workflow.
+
 ## License
 
 MIT
@@ -264,11 +334,11 @@ ClipQualityEnv draws from several foundational research areas. The connections b
 
 | Paper | Year | Relevance |
 |-------|------|-----------|
-| Bengio et al. "Curriculum Learning" | 2009 | Foundation for the Easy to Medium to Hard task progression. Key insight: ordering training samples by difficulty accelerates learning and improves convergence. |
-| Graves et al. "Automated Curriculum Learning for Neural Networks" | 2017 | Adaptive curriculum where difficulty self-adjusts based on learner performance. Directly matches the `recalibrate()` logic in `rubric.py`, which tightens thresholds as the agent's accuracy on easier tasks improves. |
+| Bengio et al. "Curriculum Learning" | 2009 | Foundation for the Easy to Medium to Hard task progression and the multi-episode curriculum auto-promotion system. Key insight: ordering training samples by difficulty accelerates learning and improves convergence. |
+| Graves et al. "Automated Curriculum Learning for Neural Networks" | 2017 | Adaptive curriculum where difficulty self-adjusts based on learner performance. Directly matches both the `recalibrate()` logic in `rubric.py` and the cross-episode curriculum promotion/demotion in `env.py`. |
 | Kumar et al. "Self-Paced Learning with Diversity" | 2010 | Agent chooses its own curriculum pace. The confidence-weighted GT promotion in `try_promote()` is a form of self-pacing, where the agent only promotes predictions it is confident in. |
 
-**Application in this environment:** The 3-task difficulty progression implements curriculum learning at the task level. Rubric calibration (`recalibrate()`) implements it across episodes, so the environment automatically gets harder as the agent succeeds on simpler clips.
+**Application in this environment:** The 4-mode difficulty system (easy, medium, hard, mixed) implements curriculum learning at the task level. The multi-episode curriculum auto-promotes or demotes the agent based on rolling performance. Rubric calibration (`recalibrate()`) implements it across episodes, so the environment automatically gets harder as the agent succeeds on simpler clips.
 
 ---
 
@@ -276,11 +346,11 @@ ClipQualityEnv draws from several foundational research areas. The connections b
 
 | Paper | Year | Relevance |
 |-------|------|-----------|
-| Culotta & McCallum "Confidence-Weighted Active Learning" | 2005 | Selectively promote high-confidence predictions to the training set. Direct precedent for `GTStore.try_promote()`, which requires `reward >= 0.85` and `confidence >= 0.80` before accepting a new ground-truth label. |
+| Culotta & McCallum "Confidence-Weighted Active Learning" | 2005 | Selectively promote high-confidence predictions to the training set. Direct precedent for `GTStore.try_promote()`, which uses difficulty-aware thresholds before accepting a new ground-truth label. |
 | Zhu et al. "Semi-Supervised Learning with Graphs" | 2003 | Self-training expands the labeled set iteratively with the model's own confident predictions. The GT expansion flywheel (more promoted clips, richer GT store, better grading signal) follows this pattern. |
-| Settles "Active Learning Literature Survey" | 2010 | Comprehensive overview of query strategies including uncertainty sampling. ClipQualityEnv inverts uncertainty sampling: rather than querying uncertain examples for human labeling, it promotes *certain* agent predictions into the GT store. |
+| Settles "Active Learning Literature Survey" | 2010 | Comprehensive overview of query strategies including uncertainty sampling. ClipQualityEnv inverts uncertainty sampling: rather than querying uncertain examples for human labeling, it promotes certain agent predictions into the GT store. |
 
-**Application in this environment:** GT expansion via `try_promote()` is active learning in reverse. The agent autonomously extends the ground-truth store by promoting high-confidence, high-reward predictions, progressively replacing rubric-derived labels with agent-confirmed ones.
+**Application in this environment:** GT expansion via `try_promote()` is active learning in reverse. The agent autonomously extends the ground-truth store by promoting high-confidence, high-reward predictions, progressively replacing rubric-derived labels with agent-confirmed ones. Difficulty-aware thresholds ensure hard tasks can still contribute to GT growth.
 
 ---
 
@@ -299,10 +369,10 @@ ClipQualityEnv draws from several foundational research areas. The connections b
 
 | Paper | Year | Relevance |
 |-------|------|-----------|
-| Sutton & Barto "Reinforcement Learning: An Introduction" | 2018 | Core RL principles. The `grade()` function in `grader.py` is a classic deterministic reward function decomposed into format, label, and reasoning components. |
+| Sutton & Barto "Reinforcement Learning: An Introduction" | 2018 | Core RL principles. The `grade()` function in `grader.py` is a deterministic reward function decomposed into format, label, reasoning, and calibration components. |
 | Ng & Russell "Algorithms for Inverse RL" | 2000 | Reward shaping foundations. The rubric calibration cycle, where thresholds tighten based on episode performance, is a form of dynamic reward shaping that keeps the task challenging as the agent improves. |
 
-**Application in this environment:** The grader is fully deterministic and rubric-derived, with no LLM judge involved. This guarantees reproducibility, enables automated validation, and satisfies the OpenEnv spec requirement for programmatic graders that return valid 0.0 to 1.0 scores.
+**Application in this environment:** The grader is fully deterministic and rubric-derived, with no LLM judge involved. The confidence calibration dimension adds a fourth reward signal that prevents degenerate confidence strategies. This guarantees reproducibility, enables automated validation, and satisfies the OpenEnv spec requirement for programmatic graders that return valid 0.0 to 1.0 scores.
 
 ---
 
@@ -313,7 +383,7 @@ ClipQualityEnv draws from several foundational research areas. The connections b
 | Bansal et al. "Emergent Complexity via Multi-Agent Competition" | 2018 | Agents and environments co-evolve, generating emergent difficulty without manual curriculum design. The rubric and GT co-evolution in ClipQualityEnv is a single-agent analogue of this pattern. |
 | Leibo et al. "Multi-Agent RL in Sequential Social Dilemmas" | 2017 | Environment complexity scales with agent capability. Matches the calibration logic: as the agent succeeds on BORDERLINE clips, the rubric tightens, creating new BORDERLINE cases. |
 
-**Application in this environment:** The learning flywheel works like this: GT expands as the agent promotes confident predictions, then the rubric tightens based on accuracy, then harder BORDERLINE cases emerge. This is co-evolution in a single-agent setting. The environment adapts to the agent's current capability level without external intervention.
+**Application in this environment:** The learning flywheel works as follows: GT expands as the agent promotes confident predictions, then the rubric tightens based on accuracy, then harder BORDERLINE cases emerge. This is co-evolution in a single-agent setting. The environment adapts to the agent's current capability level without external intervention.
 
 ---
 
