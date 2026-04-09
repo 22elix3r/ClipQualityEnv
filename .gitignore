@@ -158,4 +158,4 @@ outputs/
 .DS_Store
 *.swp
 *.bak
-.github/
+.github/prompts/
