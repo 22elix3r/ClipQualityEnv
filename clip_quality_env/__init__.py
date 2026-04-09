@@ -16,9 +16,6 @@ from .models import (
     TaskInfo,
 )
 
-# Backward-compatibility aliases (deprecated).
-PolicyEvolverEnv = ClipQualityClient
-PolicyEvolverEnvironment = ClipQualityEnvironment
 
 __all__ = [
     "Action",

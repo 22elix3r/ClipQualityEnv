@@ -12,8 +12,6 @@ from clip_quality_env import (
     TaskInfo,
 )
 
-# Backward-compatibility alias (deprecated).
-PolicyEvolverEnv = ClipQualityClient
 
 __all__ = [
     "Action",

@@ -661,5 +661,3 @@ class ClipQualityEnvironment(Environment[Action, Observation, State]):
 
 
 ClipQualityEnv = ClipQualityEnvironment
-# Backward-compatibility alias (deprecated).
-PolicyEvolverEnvironment = ClipQualityEnvironment
