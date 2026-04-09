@@ -62,6 +62,13 @@
     "reward": null,
     "source": "seed"
   },
+  "clip_001": {
+    "confidence": null,
+    "episode": 0,
+    "label": "REJECT",
+    "reward": null,
+    "source": "seed"
+  },
   "clip_0010": {
     "confidence": null,
     "episode": 0,
@@ -133,11 +140,11 @@
     "source": "seed"
   },
   "clip_002": {
-    "confidence": 0.82,
-    "episode": 1,
-    "label": "REJECT",
-    "reward": 0.85,
-    "source": "agent_promoted"
+    "confidence": null,
+    "episode": 0,
+    "label": "BORDERLINE",
+    "reward": null,
+    "source": "seed"
   },
   "clip_0020": {
     "confidence": null,
@@ -146,18 +153,39 @@
     "reward": null,
     "source": "seed"
   },
-  "clip_003": {
-    "confidence": 0.82,
-    "episode": 1,
+  "clip_0027": {
+    "confidence": null,
+    "episode": 0,
     "label": "REJECT",
-    "reward": 0.85,
-    "source": "agent_promoted"
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_003": {
+    "confidence": null,
+    "episode": 0,
+    "label": "KEEP",
+    "reward": null,
+    "source": "seed"
   },
   "clip_004": {
-    "confidence": 0.82,
-    "episode": 1,
+    "confidence": null,
+    "episode": 0,
     "label": "REJECT",
-    "reward": 0.85,
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_005": {
+    "confidence": null,
+    "episode": 0,
+    "label": "KEEP",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_006": {
+    "confidence": 0.85,
+    "episode": 5,
+    "label": "REJECT",
+    "reward": 0.8,
     "source": "agent_promoted"
   },
   "clip_008": {
@@ -165,6 +193,13 @@
     "episode": 21,
     "label": "REJECT",
     "reward": 0.856,
+    "source": "agent_promoted"
+  },
+  "clip_009": {
+    "confidence": 0.85,
+    "episode": 4,
+    "label": "REJECT",
+    "reward": 0.8,
     "source": "agent_promoted"
   },
   "clip_010": {
@@ -179,6 +214,13 @@
     "episode": 1,
     "label": "REJECT",
     "reward": 0.95,
+    "source": "agent_promoted"
+  },
+  "clip_014": {
+    "confidence": 0.9,
+    "episode": 1,
+    "label": "BORDERLINE",
+    "reward": 0.9,
     "source": "agent_promoted"
   },
   "clip_019": {
