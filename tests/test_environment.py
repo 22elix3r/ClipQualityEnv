@@ -28,8 +28,8 @@ def test_environment_reset_returns_task_observation():
     assert obs.corpus_size == obs.corpus_shown
     assert len(obs.data_corpus) == obs.corpus_size
     assert obs.clip_metadata.clip_id
-    assert obs.max_steps == 5
-    assert obs.info["steps_remaining"] == 5
+    assert obs.max_steps == 25
+    assert obs.info["steps_remaining"] == 25
 
 
 def test_environment_step_updates_state_and_reward():
@@ -208,7 +208,7 @@ def test_environment_instances_do_not_share_runtime_state():
     assert env_b.state.actions_taken == []
 
 
-def test_environment_reset_plans_five_clips_from_selected_corpus():
+def test_environment_reset_plans_twenty_five_clips_from_selected_corpus():
     env = ClipQualityEnvironment()
     obs = env.reset(task_id="task_medium", seed=1234)
     expected_source = obs.info["corpus_source"]
@@ -216,16 +216,16 @@ def test_environment_reset_plans_five_clips_from_selected_corpus():
     expected_ids = {str(item["clip_id"]) for item in expected_data}
     first_plan_ids = [str(item.clip.get("clip_id", "")) for item in env._episode_plan]
 
-    assert obs.max_steps == 5
-    assert obs.info["steps_remaining"] == 5
-    assert len(env._episode_plan) == 5
+    assert obs.max_steps == 25
+    assert obs.info["steps_remaining"] == 25
+    assert len(env._episode_plan) == 25
     assert {item.task_id for item in env._episode_plan} == {"task_medium"}
     assert set(first_plan_ids).issubset(expected_ids)
 
     repeated = env.reset(task_id="task_medium", seed=1234)
     repeated_plan_ids = [str(item.clip.get("clip_id", "")) for item in env._episode_plan]
-    assert repeated.max_steps == 5
-    assert repeated.info["steps_remaining"] == 5
+    assert repeated.max_steps == 25
+    assert repeated.info["steps_remaining"] == 25
     assert repeated.info["corpus_source"] == expected_source
     assert repeated.data_corpus == expected_data
     assert repeated_plan_ids == first_plan_ids
@@ -235,29 +235,29 @@ def test_environment_updates_review_status_across_queue_and_summary():
     env = ClipQualityEnvironment()
     obs = env.reset(task_id="task_hard", seed=2026)
 
-    assert obs.info["steps_remaining"] == 5
+    assert obs.info["steps_remaining"] == 25
     assert "episode_summary" not in obs.info
 
     submitted: list[tuple[str, str]] = []
     final_obs = obs
-    for step_index in range(1, 6):
+    for step_index in range(1, 26):
         current_clip_id = final_obs.clip_metadata.clip_id
         label = "KEEP" if step_index % 2 else "BORDERLINE"
         submitted.append((current_clip_id, label))
         final_obs = env.step(_action_for_clip(current_clip_id, label=label))
         queue_row = next(item for item in final_obs.data_corpus if item.get("clip_id") == current_clip_id)
         assert str(queue_row.get("review_status")) == label
-        assert final_obs.info["steps_remaining"] == max(0, 5 - step_index)
+        assert final_obs.info["steps_remaining"] == max(0, 25 - step_index)
 
     assert final_obs.done is True
-    assert final_obs.step_count == 5
+    assert final_obs.step_count == 25
     assert "episode_summary" in final_obs.info
     summary = final_obs.info["episode_summary"]
-    assert summary["steps_completed"] == 5
-    assert summary["max_steps"] == 5
+    assert summary["steps_completed"] == 25
+    assert summary["max_steps"] == 25
     assert abs(float(summary["total_reward"]) - round(float(env.state.total_reward), 4)) < 1e-9
     assert abs(float(final_obs.info["total_reward"]) - float(env.state.total_reward)) < 1e-9
-    assert abs(float(summary["average_reward"]) - round(float(env.state.total_reward) / 5.0, 4)) < 1e-9
+    assert abs(float(summary["average_reward"]) - round(float(env.state.total_reward) / 25.0, 4)) < 1e-9
 
     final_status_map = {str(item["clip_id"]): str(item["review_status"]) for item in final_obs.data_corpus}
     for clip_id, label in submitted:

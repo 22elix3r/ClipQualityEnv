@@ -73,9 +73,27 @@ def derive_clip_difficulty(clip: dict[str, Any], rubric: RubricState) -> str:
 
 
 MANUAL_ASSIGNMENT: dict[str, list[str]] = {
-    "hard":   ["clip_001", "clip_002", "clip_003", "clip_004", "clip_005"],
-    "medium": ["clip_006", "clip_007", "clip_008", "clip_009", "clip_010"],
-    "easy":   ["clip_011", "clip_012", "clip_013", "clip_014", "clip_015"],
+    "easy": [
+        "clip_0011", "clip_0012", "clip_0013", "clip_0014", "clip_0015",
+        "clip_0016", "clip_0017", "clip_0018", "clip_0019", "clip_0020",
+        "clip_0021", "clip_0022", "clip_0023", "clip_0040", "clip_0041",
+        "clip_0042", "clip_0043", "clip_0044", "clip_0045", "clip_0046",
+        "clip_0047", "clip_0048", "clip_0049", "clip_0050", "clip_0051",
+    ],
+    "medium": [
+        "clip_0006", "clip_0007", "clip_0008", "clip_0009", "clip_0010",
+        "clip_0024", "clip_0025", "clip_0026", "clip_0027", "clip_0028",
+        "clip_0029", "clip_0030", "clip_0031", "clip_0052", "clip_0053",
+        "clip_0054", "clip_0055", "clip_0056", "clip_0057", "clip_0058",
+        "clip_0059", "clip_0060", "clip_0061", "clip_0062", "clip_0063",
+    ],
+    "hard": [
+        "clip_0001", "clip_0002", "clip_0003", "clip_0004", "clip_0005",
+        "clip_0032", "clip_0033", "clip_0034", "clip_0035", "clip_0036",
+        "clip_0037", "clip_0038", "clip_0039", "clip_0064", "clip_0065",
+        "clip_0066", "clip_0067", "clip_0068", "clip_0069", "clip_0070",
+        "clip_0071", "clip_0072", "clip_0073", "clip_0074", "clip_0075",
+    ],
 }
 
 
@@ -84,7 +102,7 @@ def load_real_clip_manifest(path: str, rubric: RubricState) -> dict[str, list[di
     Load and validate real clip metadata manifest.
 
     Pools are now populated based on a manual assignment list (MANUAL_ASSIGNMENT).
-    Each pool will contain exactly 5 unique clips as specified.
+    Each pool will contain exactly 25 unique clips as specified.
     """
     pools: dict[str, list[dict[str, Any]]] = {d: [] for d in DIFFICULTIES}
     
@@ -118,14 +136,12 @@ def load_real_clip_manifest(path: str, rubric: RubricState) -> dict[str, list[di
                 if not any(c["clip_id"] == clip_id for c in pools[diff]):
                     pools[diff].append(clip_data)
 
-    # Ensure all pools have the expected 5 clips
+    # Ensure all pools have the expected number of clips
     for diff, clips in pools.items():
-        if len(clips) < 5:
-            # If some IDs from the manual assignment weren't found in the manifest, 
-            # we should raise an error or warn. Since this is an environment fix, 
-            # raising an error is safer to ensure consistency.
+        expected_count = len(MANUAL_ASSIGNMENT[diff])
+        if len(clips) < expected_count:
             missing = set(MANUAL_ASSIGNMENT[diff]) - {c["clip_id"] for c in clips}
-            print(f"Warning: Pool '{diff}' only has {len(clips)}/5 clips. Missing: {missing}")
+            print(f"Warning: Pool '{diff}' only has {len(clips)}/{expected_count} clips. Missing: {missing}")
 
     total = sum(len(items) for items in pools.values())
     if total == 0:

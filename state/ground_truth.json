@@ -2,14 +2,14 @@
   "clip_0001": {
     "confidence": null,
     "episode": 0,
-    "label": "KEEP",
+    "label": "REJECT",
     "reward": null,
     "source": "seed"
   },
   "clip_0002": {
     "confidence": null,
     "episode": 0,
-    "label": "KEEP",
+    "label": "BORDERLINE",
     "reward": null,
     "source": "seed"
   },
@@ -23,7 +23,7 @@
   "clip_0004": {
     "confidence": null,
     "episode": 0,
-    "label": "KEEP",
+    "label": "REJECT",
     "reward": null,
     "source": "seed"
   },
@@ -153,6 +153,13 @@
     "reward": null,
     "source": "seed"
   },
+  "clip_0021": {
+    "confidence": 0.9,
+    "episode": 1,
+    "label": "KEEP",
+    "reward": 0.852088,
+    "source": "agent_promoted"
+  },
   "clip_0027": {
     "confidence": null,
     "episode": 0,
@@ -167,12 +174,40 @@
     "reward": null,
     "source": "seed"
   },
+  "clip_0034": {
+    "confidence": null,
+    "episode": 0,
+    "label": "REJECT",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0035": {
+    "confidence": null,
+    "episode": 0,
+    "label": "REJECT",
+    "reward": null,
+    "source": "seed"
+  },
+  "clip_0039": {
+    "confidence": null,
+    "episode": 0,
+    "label": "REJECT",
+    "reward": null,
+    "source": "seed"
+  },
   "clip_004": {
     "confidence": null,
     "episode": 0,
     "label": "REJECT",
     "reward": null,
     "source": "seed"
+  },
+  "clip_0043": {
+    "confidence": 0.9,
+    "episode": 1,
+    "label": "KEEP",
+    "reward": 0.883016,
+    "source": "agent_promoted"
   },
   "clip_005": {
     "confidence": null,
@@ -235,6 +270,13 @@
     "episode": 1,
     "label": "REJECT",
     "reward": 0.95,
+    "source": "agent_promoted"
+  },
+  "clip_029": {
+    "confidence": 0.9,
+    "episode": 1,
+    "label": "KEEP",
+    "reward": 0.887478,
     "source": "agent_promoted"
   }
 }

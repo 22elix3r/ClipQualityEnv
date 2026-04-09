@@ -17,11 +17,13 @@ from .real_clips import load_real_clip_manifest
 from .rubric import RubricState
 from server.tasks import TASK_REGISTRY
 
-EPISODE_STEPS = 5
+EPISODE_STEPS = 25
 DEFAULT_REAL_CLIPS_MANIFEST = "data/real_clips_manifest.jsonl"
 
 # Mixed-difficulty episode layout: how many clips from each difficulty
-MIXED_DIFFICULTY_PLAN: list[str] = ["easy", "easy", "medium", "medium", "hard"]
+MIXED_DIFFICULTY_PLAN: list[str] = (
+    ["easy"] * 10 + ["medium"] * 8 + ["hard"] * 7
+)
 
 # Curriculum auto-promotion/demotion thresholds
 # (min_avg_reward_over_N_episodes, N_episodes_required)

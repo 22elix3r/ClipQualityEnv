@@ -11,6 +11,7 @@ tasks:
   - task_easy
   - task_medium
   - task_hard
+  - task_mixed
 grader:
   endpoint: /grader
   deterministic: true
@@ -19,9 +20,10 @@ baseline:
   script: inference.py
   command: "PYTHONPATH=. python inference.py"
   expected_scores:
-    task_easy: 0.84
-    task_medium: 0.63
-    task_hard: 0.42
+    task_easy: 0.7805
+    task_medium: 0.7545
+    task_hard: 0.5996
+    task_mixed: 0.6793
 tags:
   - openenv
   - reinforcement-learning

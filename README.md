@@ -37,7 +37,7 @@ ClipQualityEnv came out of that experience. The idea was to turn what I learned 
 
 ## What it does
 
-The environment presents an LLM agent with a 5-step episode. Each step shows one clip's metadata, a quality rubric, and the agent's prior prediction history for that clip. The agent classifies the clip and receives a structured reward signal broken down into four components:
+The environment presents an LLM agent with a 25-step episode. Each step shows one clip's metadata, a quality rubric, and the agent's prior prediction history for that clip. The agent classifies the clip and receives a structured reward signal broken down into four components:
 
 - **Format score** (max 0.10): validates that the label, reasoning, and confidence are all well-formed
 - **Label score** (max 0.68): checks label correctness against ground truth or rubric-derived labels, scaled by difficulty
@@ -50,7 +50,7 @@ Difficulty-proportional ceilings make sure the agent cannot trivially reach perf
 
 ### Mixed-Difficulty Episodes
 
-The `task_mixed` mode builds a single episode that transitions across difficulty levels: 2 easy clips, followed by 2 medium clips, followed by 1 hard clip. This progressive escalation within a single episode tests the agent's ability to adapt its strategy as signal quality degrades.
+The `task_mixed` mode builds a single episode that transitions across difficulty levels: 10 easy clips, followed by 8 medium clips, followed by 7 hard clips. This progressive escalation within a single episode tests the agent's ability to adapt its strategy as signal quality degrades.
 
 ### Multi-Episode Curriculum
 
@@ -164,9 +164,9 @@ The memory never reveals the expected label. All feedback is based on the reward
 | `task_easy` | Easy | Clear, unambiguous quality signals across most features |
 | `task_medium` | Medium | Mixed indicators requiring trade-off reasoning |
 | `task_hard` | Hard | Conflicting signals with no dominant clear indicator |
-| `task_mixed` | Mixed | Progressive difficulty: 2 easy, 2 medium, 1 hard |
+| `task_mixed` | Mixed | Progressive difficulty: 10 easy, 8 medium, 7 hard |
 
-Each task corpus contains 8+ clips with balanced label distributions across KEEP, BORDERLINE, and REJECT.
+Each task corpus contains 25 clips with balanced label distributions across KEEP, BORDERLINE, and REJECT.
 
 ## API Endpoints
 
@@ -193,7 +193,7 @@ The `/grader` endpoint accepts the same action schema as `/step`:
   "label": "KEEP",
   "reasoning": "face_confidence is 0.91, above the KEEP threshold (0.80). motion_score is 0.12, stable below the KEEP ceiling (0.25).",
   "confidence": 0.85,
-  "clip_id": "clip_001"
+  "clip_id": "clip_0001"
 }
 ```
 
@@ -269,7 +269,7 @@ Output format (`--output json` for machine-readable):
 [START] task=task_easy env=ClipQualityEnv model=llama-3.3-70b-versatile mode=llm
 [STEP] step=1 label=KEEP reward=0.80 done=false error=null
 ...
-[END] success=true steps=5 score=0.812 total_reward=4.060 final_reward=0.90 rewards=0.80,...
+[END] success=true steps=25 score=0.780 total_reward=19.512 final_reward=0.644 rewards=0.90,...
 ```
 
 ## Extracting Real Clip Metadata
@@ -309,7 +309,7 @@ git push hf-space main
 
 - `openenv-core >= 0.2.3`: OpenEnv environment base classes and FastAPI server factory
 - `fastapi >= 0.104.0` + `uvicorn >= 0.24.0`: HTTP server
-- `gradio >= 4.0.0`: Interactive dashboard
+- `gradio >= 5.0.0, < 6.0.0`: Interactive dashboard
 - `openai >= 1.0.0`: OpenAI-compatible client (used with HuggingFace inference router)
 - `pydantic >= 2.0.0`: Data validation and serialization
 - `opencv-python-headless >= 4.10.0`: Video processing for metadata extraction
@@ -394,4 +394,4 @@ ClipQualityEnv draws from several foundational research areas. The connections b
 | Brown et al. "Language Models are Few-Shot Learners" | 2020 | In-context learning (ICL) enables LLMs to improve on a task purely from examples in the context window, without weight updates. The per-episode ICL loop uses this for within-episode improvement. |
 | Xie et al. "An Explanation of In-Context Learning as Implicit Bayesian Inference" | 2022 | Theoretical grounding for why ICL works. The model implicitly updates a prior over task hypotheses from context examples, which validates the step-by-step reward feedback injection in `ICLMemory.get_context_text()`. |
 
-**Application in this environment:** The `ICLMemory` class carries reward feedback from prior attempts at each clip into subsequent steps within the same session. The agent's context window includes `label_score` signals and soft directives across attempts, enabling learning without gradient updates over a 5-step episode and across multiple episode runs within a session.
+**Application in this environment:** The `ICLMemory` class carries reward feedback from prior attempts at each clip into subsequent steps within the same session. The agent's context window includes `label_score` signals and soft directives across attempts, enabling learning without gradient updates over a 25-step episode and across multiple episode runs within a session.

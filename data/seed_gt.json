@@ -1,10 +1,10 @@
 {
-  "clip_001": {"label": "REJECT",     "source": "seed", "episode": 0},
-  "clip_002": {"label": "BORDERLINE", "source": "seed", "episode": 0},
-  "clip_003": {"label": "KEEP",       "source": "seed", "episode": 0},
-  "clip_004": {"label": "REJECT",     "source": "seed", "episode": 0},
-  "clip_005": {"label": "KEEP",       "source": "seed", "episode": 0},
-  "clip_0017": {"label": "REJECT",    "source": "seed", "episode": 0, "note": "GT override: rubric derives BORDERLINE but corpus expects REJECT due to cumulative trade-off weakness"},
-  "clip_0018": {"label": "REJECT",    "source": "seed", "episode": 0, "note": "GT override: ensures hard task consistency"},
-  "clip_0027": {"label": "REJECT",    "source": "seed", "episode": 0, "note": "GT override: ensures hard task consistency"}
+  "clip_0001": {"label": "REJECT",     "source": "seed", "episode": 0},
+  "clip_0002": {"label": "BORDERLINE", "source": "seed", "episode": 0},
+  "clip_0003": {"label": "KEEP",       "source": "seed", "episode": 0},
+  "clip_0004": {"label": "REJECT",     "source": "seed", "episode": 0},
+  "clip_0005": {"label": "KEEP",       "source": "seed", "episode": 0},
+  "clip_0034": {"label": "REJECT",    "source": "seed", "episode": 0, "note": "GT override: rubric derives BORDERLINE but corpus expects REJECT due to cumulative trade-off weakness"},
+  "clip_0035": {"label": "REJECT",    "source": "seed", "episode": 0, "note": "GT override: ensures hard task consistency"},
+  "clip_0039": {"label": "REJECT",    "source": "seed", "episode": 0, "note": "GT override: ensures hard task consistency"}
 }

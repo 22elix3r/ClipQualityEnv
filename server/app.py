@@ -432,12 +432,26 @@ def _format_baseline_result_markdown(
     return "\n".join(lines)
 
 
+BASELINE_WORKER_TIMEOUT_SECONDS = 180  # 3 minutes hard deadline for the entire baseline run
+
+
 def _run_baseline_background(run_id: str, task: str | None = None, icl_memory: ICLMemory | None = None) -> None:
+    import concurrent.futures
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="baseline-exec")
     try:
-        raw = inference.run_baseline(task=task, icl_memory=icl_memory)
+        future = executor.submit(inference.run_baseline, task=task, icl_memory=icl_memory)
+        raw = future.result(timeout=BASELINE_WORKER_TIMEOUT_SECONDS)
         baseline_run_tracker.mark_complete(run_id, _baseline_payload_from_raw(raw))
+    except concurrent.futures.TimeoutError:
+        baseline_run_tracker.mark_failed(
+            run_id, {"message": f"Baseline run timed out after {BASELINE_WORKER_TIMEOUT_SECONDS}s"}
+        )
     except Exception as exc:
         baseline_run_tracker.mark_failed(run_id, {"message": str(exc)})
+    finally:
+        executor.shutdown(wait=False)
+
 
 
 def _start_baseline_ui_run(task: str | None = None, icl_memory: ICLMemory | None = None) -> tuple[str, str, str, dict[str, Any], dict[str, Any]]:
@@ -978,7 +992,7 @@ def build_custom_ui() -> gr.Blocks:
     with gr.Blocks(
         title="ClipQualityEnv — Talking-Head Clip Quality Assessment",
         theme=gr.themes.Soft(
-            primary_hue="orange",
+            primary_hue="slate",
             font=gr.themes.GoogleFont("Source Sans Pro"),
         ),
         css="""
@@ -1005,7 +1019,7 @@ def build_custom_ui() -> gr.Blocks:
                 gr.Markdown("### Scenario Metrics")
                 with gr.Group():
                     best_score_disp = gr.Number(label="Environment Best Score", value=0.0, interactive=False)
-                    steps_left_disp = gr.Number(label="Remaining Execution Steps", value=5, interactive=False)
+                    steps_left_disp = gr.Number(label="Remaining Execution Steps", value=25, interactive=False)
                     episode_disp = gr.Textbox(label="Active Episode ID", value="N/A", interactive=False)
                 
                 reward_outcome_disp = gr.Markdown("### Awaiting Scenario...")
@@ -1034,9 +1048,6 @@ def build_custom_ui() -> gr.Blocks:
                         session_history_table = gr.DataFrame(
                             value=pd.DataFrame(columns=session_history_columns),
                             label="Per-step Classification History",
-                            headers=session_history_columns,
-                            col_count=(len(session_history_columns), "fixed"),
-                            datatype=["number", "str", "str", "str", "number"],
                             interactive=False,
                         )
                         session_history_cues = gr.Markdown("### Match Results\n_No actions yet._")
@@ -1049,10 +1060,6 @@ def build_custom_ui() -> gr.Blocks:
                 dominant_features_table = gr.DataFrame(
                     value=pd.DataFrame(columns=dominant_feature_columns),
                     label="Feature Focus Table",
-                    headers=dominant_feature_columns,
-                    column_count=len(dominant_feature_columns),
-                    column_limits=(len(dominant_feature_columns), len(dominant_feature_columns)),
-                    datatype=["str", "number", "str", "str"],
                     interactive=False,
                     visible=False
                 )

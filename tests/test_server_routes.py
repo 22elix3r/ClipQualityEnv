@@ -67,7 +67,7 @@ def test_dashboard_route_exists():
     assert resp.status_code == 200
 
 
-def test_dashboard_remaining_steps_defaults_to_five():
+def test_dashboard_remaining_steps_defaults_to_twenty_five():
     demo = app_module.build_custom_ui()
     step_indicators = [
         block
@@ -75,7 +75,7 @@ def test_dashboard_remaining_steps_defaults_to_five():
         if isinstance(block, gr.Number) and getattr(block, "label", "") == "Remaining Execution Steps"
     ]
     assert step_indicators
-    assert float(step_indicators[0].value) == 5.0
+    assert float(step_indicators[0].value) == 25.0
 
 
 def test_grader_route_scores_action():
@@ -269,7 +269,7 @@ def test_dashboard_handlers_create_isolated_environment_instances():
     assert isinstance(env_a, ClipQualityEnvironment)
     assert env_a.state.step_count == 0
 
-    # handle_step now runs a full 5-step agent episode
+    # handle_step now runs a full 25-step agent episode
     stepped_a = handle_step(
         env_a,
         "task_easy",
@@ -280,14 +280,14 @@ def test_dashboard_handlers_create_isolated_environment_instances():
         None,  # icl_memory_state
     )
     assert stepped_a[0] is env_a
-    assert env_a.state.step_count == 5
+    assert env_a.state.step_count == 25
 
     session_b = handle_reset(None, "task_easy")
     env_b = session_b[0]
     assert isinstance(env_b, ClipQualityEnvironment)
     assert env_b is not env_a
     assert env_b.state.step_count == 0
-    assert env_a.state.step_count == 5
+    assert env_a.state.step_count == 25
 
     handle_step(
         env_b,
@@ -298,8 +298,8 @@ def test_dashboard_handlers_create_isolated_environment_instances():
         "",    # clip_id
         None,  # icl_memory_state
     )
-    assert env_b.state.step_count == 5
-    assert env_a.state.step_count == 5
+    assert env_b.state.step_count == 25
+    assert env_a.state.step_count == 25
 
 
 def test_tiered_submission_merge_by_tab():
@@ -384,7 +384,7 @@ def test_task_change_handler_maps_scenario_to_input_tab():
 
 
 def test_handle_step_runs_agent_episode_and_returns_valid_outputs():
-    """handle_step now runs a full 5-step agent episode internally.
+    """handle_step now runs a full 25-step agent episode internally.
     Verify it produces valid structured outputs."""
     demo = app_module.build_custom_ui()
     handler_map = {block_fn.fn.__name__: block_fn.fn for block_fn in demo.fns.values()}
@@ -406,17 +406,17 @@ def test_handle_step_runs_agent_episode_and_returns_valid_outputs():
         None,  # icl_memory_state
     )
 
-    # handle_step runs a full 5-step episode
+    # handle_step runs a full 25-step episode
     assert step_result[0] is env
-    assert env.state.step_count == 5
+    assert env.state.step_count == 25
 
     # Corpus DataFrame should be populated
     step_df = step_result[1]
     assert not step_df.empty
 
-    # Session history should have 5 rows
+    # Session history should have 25 rows
     history_df = step_result[9]
-    assert len(history_df) == 5
+    assert len(history_df) == 25
 
     # All submitted labels should be valid
     for label in history_df["Submitted Label"]:
@@ -445,7 +445,7 @@ def test_format_obs_sorts_queue_by_clip_id_and_uses_full_corpus_counts():
         "task_id": "task_medium",
         "episode_id": "episode-format",
         "step_count": 0,
-        "max_steps": 5,
+        "max_steps": 25,
         "step": 1,
         "rubric_version": 1,
         "rubric_summary": "test rubric",
@@ -458,7 +458,7 @@ def test_format_obs_sorts_queue_by_clip_id_and_uses_full_corpus_counts():
         "done": False,
         "info": {
             "best_score": 0.0,
-            "steps_remaining": 5,
+            "steps_remaining": 25,
             "session_history": [],
             "total_reward": 0.0,
             "format_score": 0.0,
@@ -498,7 +498,7 @@ def test_dashboard_queue_row_updates_to_submitted_label_after_step():
     # All clips start as pending
     assert all(str(s).lower() == "pending" for s in reset_df["Current Review Status"])
 
-    # handle_step runs a full 5-step agent episode
+    # handle_step runs a full 25-step agent episode
     step_result = handle_step(
         env,
         "task_easy",
@@ -552,7 +552,7 @@ def test_dashboard_session_history_updates_and_resets():
     assert reset_history_df.empty
     assert "No actions yet" in reset_result[10]
 
-    # handle_step runs a full 5-step episode via the agent
+    # handle_step runs a full 25-step episode via the agent
     first_step = handle_step(
         env,
         "task_easy",
@@ -564,7 +564,7 @@ def test_dashboard_session_history_updates_and_resets():
     )
     first_history_df = first_step[9]
     first_rows = first_history_df.to_dict(orient="records")
-    assert len(first_rows) == 5
+    assert len(first_rows) == 25
 
     # Verify structure of each history row
     for row in first_rows:

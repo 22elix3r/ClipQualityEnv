@@ -17,8 +17,8 @@ def test_run_baseline_works_without_token(monkeypatch):
     result = inference.run_baseline(task="task_easy")
     assert result["detail"][0]["task_id"] == "task_easy"
     assert result["detail"][0]["mode"] == "fallback"
-    assert result["detail"][0]["steps"] == 5
-    assert 0.0 <= result["detail"][0]["total_reward"] <= 5.0
+    assert result["detail"][0]["steps"] == 25
+    assert 0.0 <= result["detail"][0]["total_reward"] <= 25.0
     assert 0.0 <= result["detail"][0]["final_reward"] <= 1.0
     assert 0.0 <= result["detail"][0]["reward"] <= 1.0
     assert 0.0 <= result["baseline_scores"]["overall_avg"] <= 1.0
@@ -65,8 +65,8 @@ def test_run_episode_preserves_logging_and_structure(capsys):
     assert "total_reward=" in output and "final_reward=" in output
     assert result["task_id"] == "task_easy"
     assert result["mode"] == "llm"
-    assert result["steps"] == 5
+    assert result["steps"] == 25
     assert 0.0 <= result["final_reward"] <= 1.0
-    assert 0.0 <= result["total_reward"] <= 5.0
+    assert 0.0 <= result["total_reward"] <= 25.0
     assert 0.0 <= result["reward"] <= 1.0
     assert abs(result["reward"] * result["steps"] - result["total_reward"]) < 1e-9

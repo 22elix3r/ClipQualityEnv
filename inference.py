@@ -44,6 +44,8 @@ from server.tasks import TASK_IDS, TASK_REGISTRY
 DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
 DEFAULT_MODEL_NAME = "llama-3.3-70b-versatile"
 VALID_LABELS = {"KEEP", "BORDERLINE", "REJECT"}
+LLM_REQUEST_TIMEOUT_SECONDS = 30
+LLM_CLIENT_TIMEOUT_SECONDS = 60
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Utility helpers
@@ -55,7 +57,7 @@ def _load_client() -> tuple[OpenAI, str]:
     token = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY")
     if not token:
         raise ValueError("HF_TOKEN (or OPENAI_API_KEY) environment variable is required")
-    return OpenAI(api_key=token, base_url=api_base_url), model_name
+    return OpenAI(api_key=token, base_url=api_base_url, timeout=LLM_CLIENT_TIMEOUT_SECONDS), model_name
 
 
 def _extract_json(raw: str) -> Dict:
@@ -134,6 +136,7 @@ class ClipQualityAgent:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
+                timeout=LLM_REQUEST_TIMEOUT_SECONDS,
             )
             raw = (resp.choices[0].message.content or "").strip()
             return _extract_json(raw)
@@ -156,25 +159,33 @@ class ClipQualityAgent:
           - Hard reject: occlusion present
           - Hard reject: face_confidence < 0.60  (rubric uses 0.65 — intentionally looser)
           - Hard reject: motion_score > 0.50      (rubric uses 0.45 — intentionally looser)
-          - KEEP signal: face_confidence >= 0.85 AND motion_score <= 0.20
-          - Otherwise: BORDERLINE (default)
+          - Multi-signal KEEP: need strong face + low motion + at least one
+            supporting secondary signal (audio or lighting)
+          - Mild REJECT: face is questionable AND audio is poor
         """
         if bool(clip.get("occlusion_present")):
             return "REJECT"
         face_conf = float(clip.get("face_confidence", 0.5))
         motion = float(clip.get("motion_score", 0.5))
+        audio = float(clip.get("audio_snr_db", 15.0))
+        lighting = float(clip.get("lighting_uniformity", 0.5))
 
-        # Hard rejects on severe values only (coarser thresholds than grader)
+        # Hard rejects on severe values
         if face_conf < 0.60:
             return "REJECT"
         if motion > 0.50:
             return "REJECT"
 
-        # Only call KEEP when both primary signals are clearly good
-        if face_conf >= 0.85 and motion <= 0.20:
+        # Multi-signal KEEP: need strong face + low motion + at least one
+        # supporting secondary signal (audio or lighting)
+        secondary_good = (audio >= 20.0) or (lighting >= 0.68)
+        if face_conf >= 0.82 and motion <= 0.28 and secondary_good:
             return "KEEP"
 
-        # Default — the agent must learn when to deviate from this
+        # Mild REJECT: face is questionable AND audio is poor
+        if face_conf < 0.67 and audio < 15.0:
+            return "REJECT"
+
         return "BORDERLINE"
 
     def _memory_guided_label(
@@ -530,7 +541,7 @@ def run_baseline(
     except Exception as exc:
         load_error = exc
 
-    tasks = [task] if task else list(TASK_IDS)
+    tasks = [task] if task else list(TASK_IDS) + ["task_mixed"]
     if task is not None and task not in TASK_REGISTRY:
         tasks = [task]
     start_time = time.time()
