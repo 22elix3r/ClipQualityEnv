@@ -289,6 +289,12 @@ Run all tasks:
 PYTHONPATH=. python inference.py
 ```
 
+Run the deterministic baseline used by validation:
+
+```bash
+PYTHONPATH=. python inference.py --tasks easy --episodes 1 --seed 42 --deterministic-baseline --max-steps 5
+```
+
 Run a single task:
 
 ```bash
@@ -301,13 +307,13 @@ Run the mixed-difficulty task:
 PYTHONPATH=. python inference.py task_mixed
 ```
 
-Output format (`--output json` for machine-readable):
+Structured stdout format:
 
 ```
-[START] task=task_easy env=ClipQualityEnv model=llama-3.3-70b-versatile mode=llm
-[STEP] step=1 label=KEEP reward=0.80 done=false error=null
+[START] task=task_easy episode=1 seed=42 mode=deterministic max_steps=5
+[STEP] task=task_easy episode=1 step=1 action=KEEP patient_id=clip_0001 reward=0.8000 done=false status=ok
 ...
-[END] success=true steps=25 score=0.780 total_reward=19.512 final_reward=0.644 rewards=0.90,...
+[END] task=task_easy episode=1 seed=42 score=0.7800 steps=5 done=true
 ```
 
 ## Extracting Real Clip Metadata
@@ -324,7 +330,7 @@ The manifest is loaded at startup if present at `data/real_clips_manifest.jsonl`
 ## Docker
 
 ```bash
-docker build -f server/Dockerfile -t clip-quality-env .
+docker build -t clip-quality-env .
 docker run -p 7860:7860 -e HF_TOKEN=your_token clip-quality-env
 ```
 
