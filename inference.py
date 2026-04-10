@@ -41,8 +41,8 @@ from models import Action
 from server.environment import ClipQualityEnvironment
 from server.tasks import TASK_IDS, TASK_REGISTRY
 
-DEFAULT_API_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_MODEL_NAME = "llama-3.1-8b-instant"
+DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
+DEFAULT_MODEL_NAME = "llama-3.3-70b-versatile"
 VALID_LABELS = {"KEEP", "BORDERLINE", "REJECT"}
 LLM_REQUEST_TIMEOUT_SECONDS = 30
 LLM_CLIENT_TIMEOUT_SECONDS = 60
