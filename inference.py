@@ -447,9 +447,8 @@ def run_episode(
     """
     env = ClipQualityEnvironment()
     agent = ClipQualityAgent(client, model_name)
-    own_memory = icl_memory is None
-    if own_memory:
-        icl_memory = ICLMemory()  # episode-scoped memory when no session memory
+    if icl_memory is None:
+        icl_memory = ICLMemory()  # standalone call — create session memory
 
     mode = "llm" if client is not None else "deterministic"
     obs = env.reset(task_id=task_id)
@@ -519,8 +518,8 @@ def run_episode(
         flush=True,
     )
 
-    if own_memory:
-        icl_memory.increment_episode()
+    # Always increment so cross-episode context tracks correctly
+    icl_memory.increment_episode()
 
     return {
         "task_id": task_id,
@@ -557,6 +556,13 @@ def run_baseline(
     tasks = [task] if task else list(TASK_IDS)
     if task is not None and task not in TASK_REGISTRY:
         tasks = [task]
+
+    # Create ONE shared ICLMemory for the full run if none was provided.
+    # This means the agent accumulates cross-episode learning in terminal runs
+    # (same as the Gradio gr.State session) — episode 2 sees what it learned in episode 1.
+    if icl_memory is None:
+        icl_memory = ICLMemory()
+
     start_time = time.time()
     results: list[dict[str, Any]] = []
     for task_id in tasks:
