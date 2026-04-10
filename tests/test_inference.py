@@ -16,7 +16,7 @@ def test_run_baseline_works_without_token(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     result = inference.run_baseline(task="task_easy")
     assert result["detail"][0]["task_id"] == "task_easy"
-    assert result["detail"][0]["mode"] == "fallback"
+    assert result["detail"][0]["mode"] == "deterministic"
     assert result["detail"][0]["steps"] == 25
     assert 0.0 <= result["detail"][0]["total_reward"] <= 25.0
     assert 0.0 <= result["detail"][0]["final_reward"] <= 1.0
@@ -62,9 +62,12 @@ def test_run_episode_preserves_logging_and_structure(capsys):
     result = inference.run_episode("task_easy", client, "dummy-model")
     output = capsys.readouterr().out
     assert "[START]" in output and "[STEP]" in output and "[END]" in output
-    assert "task=task_easy" in output and "score=" in output and "rewards=" in output
-    # [STEP] lines use action= not label=
+    # [START] must have episode= and seed=
+    assert "task=task_easy" in output and "episode=1" in output and "seed=" in output
+    # [STEP] must have action= not label=
     assert "action=KEEP" in output
+    # [END] must have score= and done=
+    assert "score=" in output and "done=" in output
     assert result["task_id"] == "task_easy"
     assert result["mode"] == "llm"
     assert result["steps"] == 25

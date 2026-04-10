@@ -41,8 +41,8 @@ from models import Action
 from server.environment import ClipQualityEnvironment
 from server.tasks import TASK_IDS, TASK_REGISTRY
 
-DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
-DEFAULT_MODEL_NAME = "llama-3.3-70b-versatile"
+DEFAULT_API_BASE_URL = "https://api.groq.com/openai/v1"
+DEFAULT_MODEL_NAME = "llama-3.1-8b-instant"
 VALID_LABELS = {"KEEP", "BORDERLINE", "REJECT"}
 LLM_REQUEST_TIMEOUT_SECONDS = 30
 LLM_CLIENT_TIMEOUT_SECONDS = 60
@@ -434,6 +434,9 @@ def run_episode(
     client: OpenAI | None,
     model_name: str,
     icl_memory: ICLMemory | None = None,
+    episode_num: int = 1,
+    seed: int = 42,
+    max_steps: int | None = None,
 ) -> Dict:
     """
     Run one full episode with inner ICL-RL loop.
@@ -448,15 +451,20 @@ def run_episode(
     if own_memory:
         icl_memory = ICLMemory()  # episode-scoped memory when no session memory
 
-    mode = "llm" if client is not None else "fallback"
-    print(f"[START] task={task_id} env=ClipQualityEnv model={model_name} mode={mode}", flush=True)
+    mode = "llm" if client is not None else "deterministic"
     obs = env.reset(task_id=task_id)
+    effective_max_steps = max_steps if max_steps is not None else int(obs.max_steps)
+    print(
+        f"[START] task={task_id} episode={episode_num} seed={seed} mode={mode} max_steps={effective_max_steps}",
+        flush=True,
+    )
+    # env already reset above
     step_num = 0
     rewards: list[float] = []
     action_history: list[str] = []
     clip_ids: list[str] = []
 
-    for _ in range(int(obs.max_steps)):
+    for _ in range(effective_max_steps):
         step_num += 1
         clip_id_val = str(obs.clip_metadata.clip_id)
         clip_ids.append(clip_id_val)
@@ -490,9 +498,11 @@ def run_episode(
             label_score=raw_label_score,
         )
 
+        status = "done" if done else "ok"
+        clip_id_out = clip_id_val if clip_id_val else "None"
         print(
-            f"[STEP] step={step_num} action={action_name} reward={reward:.2f} "
-            f"done={str(done).lower()} error=null",
+            f"[STEP] task={task_id} episode={episode_num} step={step_num} action={action_name}"
+            f" patient_id={clip_id_out} reward={reward:.4f} done={str(done).lower()} status={status}",
             flush=True,
         )
         if done:
@@ -504,7 +514,8 @@ def run_episode(
     success = score >= 0.70
     rewards_str = ",".join([f"{r:.2f}" for r in rewards]) if rewards else "0.00"
     print(
-        f"[END] task={task_id} success={str(success).lower()} steps={step_num} score={score:.2f} rewards={rewards_str}",
+        f"[END] task={task_id} episode={episode_num} seed={seed} score={score:.4f}"
+        f" steps={step_num} done={str(done).lower()}",
         flush=True,
     )
 
@@ -531,6 +542,9 @@ def run_episode(
 def run_baseline(
     task: str | None = None,
     icl_memory: ICLMemory | None = None,
+    seed: int = 42,
+    episodes: int = 1,
+    max_steps: int | None = None,
 ) -> Dict:
     client: OpenAI | None = None
     model_name = os.environ.get("MODEL_NAME", DEFAULT_MODEL_NAME)
@@ -540,28 +554,37 @@ def run_baseline(
     except Exception as exc:
         load_error = exc
 
-    tasks = [task] if task else list(TASK_IDS) + ["task_mixed"]
+    tasks = [task] if task else list(TASK_IDS)
     if task is not None and task not in TASK_REGISTRY:
         tasks = [task]
     start_time = time.time()
     results: list[dict[str, Any]] = []
     for task_id in tasks:
-        try:
-            results.append(run_episode(task_id, client, model_name, icl_memory=icl_memory))
-        except Exception as exc:
-            print(f"[START] task={task_id} env=ClipQualityEnv model={model_name}", flush=True)
-            print(f"[END] success=false steps=0 score=0.000 rewards=0.00 error={str(exc)}", flush=True)
-            results.append(
-                {
-                    "task_id": task_id,
-                    "reward": 0.0,
-                    "total_reward": 0.0,
-                    "final_reward": 0.0,
-                    "steps": 0,
-                    "success": False,
-                    "error": str(exc),
-                }
-            )
+        for ep in range(1, episodes + 1):
+            try:
+                results.append(run_episode(
+                    task_id, client, model_name,
+                    icl_memory=icl_memory,
+                    episode_num=ep,
+                    seed=seed,
+                    max_steps=max_steps,
+                ))
+            except Exception as exc:
+                mode = "llm" if client is not None else "deterministic"
+                eff_steps = max_steps or 25
+                print(f"[START] task={task_id} episode={ep} seed={seed} mode={mode} max_steps={eff_steps}", flush=True)
+                print(f"[END] task={task_id} episode={ep} seed={seed} score=0.0000 steps=0 done=false", flush=True)
+                results.append(
+                    {
+                        "task_id": task_id,
+                        "reward": 0.0,
+                        "total_reward": 0.0,
+                        "final_reward": 0.0,
+                        "steps": 0,
+                        "success": False,
+                        "error": str(exc),
+                    }
+                )
 
     overall = sum(float(r.get("reward", 0.0)) for r in results) / len(results) if results else 0.0
     output = {
@@ -580,12 +603,42 @@ def run_baseline(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="ClipQualityEnv inference baseline runner")
+    parser.add_argument("task", nargs="?", default=None, help="Single task id to run")
+    parser.add_argument("--tasks", nargs="+", default=None,
+                        help="One or more task ids (e.g. --tasks easy medium hard)")
+    parser.add_argument("--episodes", type=int, default=1,
+                        help="Number of episodes per task")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
+    parser.add_argument("--deterministic-baseline", action="store_true",
+                        help="Run in deterministic fallback mode (no LLM)")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Override episode max steps")
     parser.add_argument("--output", choices=["text", "json"], default="text")
-    parser.add_argument("task", nargs="?", default=None)
     args = parser.parse_args()
 
-    result = run_baseline(task=args.task)
+    # Resolve which task(s) to run
+    if args.tasks:
+        # --tasks accepts short names (easy) or full ids (task_easy)
+        resolved = [t if t.startswith("task_") else f"task_{t}" for t in args.tasks]
+        task_filter = resolved[0] if len(resolved) == 1 else None
+    elif args.task:
+        task_filter = args.task if args.task.startswith("task_") else f"task_{args.task}"
+    else:
+        task_filter = None
+
+    if args.deterministic_baseline:
+        import os as _os
+        _os.environ.pop("HF_TOKEN", None)
+        _os.environ.pop("OPENAI_API_KEY", None)
+
+    result = run_baseline(
+        task=task_filter,
+        seed=args.seed,
+        episodes=args.episodes,
+        max_steps=args.max_steps,
+    )
     if args.output == "json":
         print(json.dumps(result))
     else:
