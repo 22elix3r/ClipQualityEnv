@@ -165,7 +165,7 @@ python -m openenv.cli validate
 
 # Docker build & run
 docker build -t clip-quality-env .
-docker run --rm -p 8000:8000 clip-quality-env
+docker run --rm -p 7860:7860 clip-quality-env
 ```
 
 ## Pull Request Checklist
