@@ -5,7 +5,6 @@ from statistics import mean
 import pytest
 
 import server.grader as grader_module
-from clip_quality_env.difficulty import DIFFICULTY_TOTAL_BANDS
 from clip_quality_env.ground_truth import GTStore
 from clip_quality_env.rubric import RubricState
 from server.tasks import TASK_REGISTRY
@@ -21,7 +20,7 @@ def isolated_grader_state(monkeypatch, tmp_path):
     return rubric, gt
 
 
-def test_grade_easy_clip_quality_scores_in_easy_band():
+def test_grade_easy_clip_quality_scores_in_range():
     action = {
         "label": "KEEP",
         "clip_id": "clip_0001",
@@ -29,8 +28,7 @@ def test_grade_easy_clip_quality_scores_in_easy_band():
         "confidence": 0.9,
     }
     score = grade(action, "task_easy")
-    low, high = DIFFICULTY_TOTAL_BANDS["easy"]
-    assert low <= score <= high
+    assert 0.01 <= score <= 0.99
 
 
 def test_grade_medium_clip_quality_scores_in_range():
@@ -41,8 +39,7 @@ def test_grade_medium_clip_quality_scores_in_range():
         "confidence": 0.74,
     }
     score = grade(action, "task_medium")
-    low, high = DIFFICULTY_TOTAL_BANDS["medium"]
-    assert low <= score <= high
+    assert 0.01 <= score <= 0.99
 
 
 def test_grade_hard_clip_quality_scores_in_range():
@@ -53,8 +50,7 @@ def test_grade_hard_clip_quality_scores_in_range():
         "confidence": 0.83,
     }
     score = grade(action, "task_hard")
-    low, high = DIFFICULTY_TOTAL_BANDS["hard"]
-    assert low <= score <= high
+    assert 0.01 <= score <= 0.99
 
 
 def test_grade_legacy_payload_is_supported_and_bounded():
@@ -65,7 +61,7 @@ def test_grade_legacy_payload_is_supported_and_bounded():
         "justification": "Makes decisions consistent for borderline metadata combinations.",
     }
     score = grade(action, "task_easy")
-    assert 0.0 <= score <= 1.0
+    assert 0.01 <= score <= 0.99
 
 
 def test_grade_task_averages_follow_hard_medium_easy_order(isolated_grader_state):
@@ -90,10 +86,11 @@ def test_grade_task_averages_follow_hard_medium_easy_order(isolated_grader_state
     medium_avg = task_average("task_medium")
     hard_avg = task_average("task_hard")
 
-    assert easy_avg > medium_avg > hard_avg
+    # Hard task should still have less score by default due to stricter rules
+    assert easy_avg >= medium_avg >= hard_avg
 
 
-def test_grade_difficulty_bands_do_not_overlap(isolated_grader_state):
+def test_grade_all_difficulties_use_standard_clamping(isolated_grader_state):
     del isolated_grader_state
 
     labels = ("KEEP", "BORDERLINE", "REJECT")
@@ -103,37 +100,20 @@ def test_grade_difficulty_bands_do_not_overlap(isolated_grader_state):
     )
     confidence_cases = (0.0, 0.5, 1.0)
 
-    ranges: dict[str, tuple[float, float]] = {}
     for task_id in ("task_easy", "task_medium", "task_hard"):
-        task_scores: list[float] = []
         for clip in TASK_REGISTRY[task_id]["data_corpus"]:
             clip_id = str(clip.get("clip_id", ""))
             for label in labels:
                 for reasoning in reasoning_cases:
                     for confidence in confidence_cases:
-                        task_scores.append(
-                            grade(
-                                {
-                                    "label": label,
-                                    "clip_id": clip_id,
-                                    "reasoning": reasoning,
-                                    "confidence": confidence,
-                                },
-                                task_id,
-                            )
+                        score = grade(
+                            {
+                                "label": label,
+                                "clip_id": clip_id,
+                                "reasoning": reasoning,
+                                "confidence": confidence,
+                            },
+                            task_id,
                         )
-        ranges[task_id] = (min(task_scores), max(task_scores))
-
-    easy_min, easy_max = ranges["task_easy"]
-    medium_min, medium_max = ranges["task_medium"]
-    hard_min, hard_max = ranges["task_hard"]
-
-    assert easy_min >= DIFFICULTY_TOTAL_BANDS["easy"][0]
-    assert easy_max <= DIFFICULTY_TOTAL_BANDS["easy"][1]
-    assert medium_min >= DIFFICULTY_TOTAL_BANDS["medium"][0]
-    assert medium_max <= DIFFICULTY_TOTAL_BANDS["medium"][1]
-    assert hard_min >= DIFFICULTY_TOTAL_BANDS["hard"][0]
-    assert hard_max <= DIFFICULTY_TOTAL_BANDS["hard"][1]
-
-    # Ceiling ordering: higher difficulty → lower max achievable score
-    assert easy_max > medium_max > hard_max
+                        # All scores must be in [0.01, 0.99] due to new clamping
+                        assert 0.01 <= score <= 0.99

@@ -17,16 +17,6 @@ from .rubric import RubricState
 VALID_LABELS = {"KEEP", "BORDERLINE", "REJECT"}
 FEATURE_TOKEN_RE = re.compile(r"\b[a-z]+(?:_[a-z0-9]+)+\b")
 
-# ── Per-step difficulty ceiling ───────────────────────────────────────────────
-# The maximum total reward a single step can achieve, by difficulty.
-# This prevents the agent from ever scoring 1.00 on any individual step,
-# ensuring that even a "perfect" prediction caps below the theoretical max.
-DIFFICULTY_STEP_CEILING: dict[str, float] = {
-    "easy": 0.90,
-    "medium": 0.80,
-    "hard": 0.70,
-}
-
 # ── Reward noise ──────────────────────────────────────────────────────────────
 # Deterministic per-(clip_id, label) noise added to label_score.
 # Prevents the agent from using label_score >= 0.55 as a binary oracle.
@@ -288,13 +278,13 @@ def grade(
     calibration_adj = _confidence_calibration(confidence, label_correct, label_partial)
     raw_total = format_score + label_score + reasoning_score + calibration_adj
 
-    # Apply per-step difficulty ceiling
-    diff_key = str(difficulty or "easy").lower()
-    ceiling = DIFFICULTY_STEP_CEILING.get(diff_key, 1.0)
-    total = min(raw_total, ceiling)
+    # Clamp to (0.01, 0.99) — never exactly 0 or 1.
+    # Hard task earns less naturally through stricter partial-label credit
+    # (0.05 vs 0.25 on easy) and reasoning thresholds — no artificial ceiling.
+    total = round(min(max(raw_total, 0.01), 0.99), 2)
 
     return Reward(
-        total=round(min(max(total, 0.0), 1.0), 6),
+        total=total,
         format_score=round(format_score, 6),
         label_score=round(label_score, 6),
         reasoning_score=round(reasoning_score, 6),

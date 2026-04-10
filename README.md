@@ -28,7 +28,7 @@ flowchart TD
     OBS["📋 Observation\n• clip_metadata (14 features)\n• rubric_summary\n• ICL history"] --> AGT
     AGT["🤖 LLM Agent\nICL-RL Feedback Loop"] --> STEP
     STEP["⚡ Action → env.step()\nKEEP / BORDERLINE / REJECT + reasoning"] --> SCORE
-    SCORE["🏁 Deterministic Grader\nformat + label + reasoning + calibration\n0.00 – 1.00"]
+    SCORE["🏁 Deterministic Grader\nformat + label + reasoning + calibration\n0.01 – 0.99"]
 ```
 
 ## Baseline Performance
@@ -62,11 +62,11 @@ ClipQualityEnv came out of that experience. The idea was to turn what I learned 
 The environment presents an LLM agent with a 25-step episode. Each step shows one clip's metadata, a quality rubric, and the agent's prior prediction history for that clip. The agent classifies the clip and receives a structured reward signal broken down into four components:
 
 - **Format score** (max 0.10): validates that the label, reasoning, and confidence are all well-formed
-- **Label score** (max 0.68): checks label correctness against ground truth or rubric-derived labels, scaled by difficulty
+- **Label score** (max 0.68): checks label correctness against ground truth or rubric-derived labels, with deterministic per-clip noise
 - **Reasoning score** (max 0.30): checks that the reasoning mentions dominant features with directional language and contains no hallucinated feature names
-- **Calibration adjustment** (+/- 0.05): rewards well-calibrated confidence (bonus for correct + confident predictions, penalty for overconfident errors)
+- **Calibration adjustment** (max +/- 0.05): rewards well-calibrated confidence (e.g., +0.03 bonus for correct + confident predictions)
 
-Difficulty-proportional ceilings make sure the agent cannot trivially reach perfect scores. Easy tasks cap at 0.90, medium at 0.80, and hard at 0.70 per step.
+Scores are normalized and clamped to the range **[0.01, 0.99]** across all tasks. Instead of artificial band ceilings, the environment enforces strict rule-based difficulty: the hard task uses much stricter reasoning thresholds and provides minimal partial credit for borderline labels, naturally leading to lower average rewards.
 
 ## Key Features
 

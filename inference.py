@@ -451,7 +451,7 @@ def run_episode(
         icl_memory = ICLMemory()  # standalone call — create session memory
 
     mode = "llm" if client is not None else "deterministic"
-    obs = env.reset(task_id=task_id)
+    obs = env.reset(task_id=task_id, seed=seed)  # seed drives clip ordering
     effective_max_steps = max_steps if max_steps is not None else int(obs.max_steps)
     print(
         f"[START] task={task_id} episode={episode_num} seed={seed} mode={mode} max_steps={effective_max_steps}",

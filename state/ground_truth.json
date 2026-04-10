@@ -202,6 +202,13 @@
     "reward": null,
     "source": "seed"
   },
+  "clip_0042": {
+    "confidence": 0.95,
+    "episode": 1,
+    "label": "KEEP",
+    "reward": 0.9,
+    "source": "agent_promoted"
+  },
   "clip_0043": {
     "confidence": 0.9,
     "episode": 1,
