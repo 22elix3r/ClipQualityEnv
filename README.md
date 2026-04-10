@@ -15,7 +15,11 @@ tags:
   - talking-head
 ---
 
+# ClipQualityEnv
+
 An OpenEnv-compliant reinforcement learning environment for curating high-quality talking-head video clips intended for Audio-Visual (AV) LoRA fine-tuning. The agent learns to classify clips as KEEP, BORDERLINE, or REJECT by evaluating per-clip metadata against a versioned quality rubric, ensuring only the cleanest, most training-appropriate clips make it into a LoRA dataset.
+
+## Architecture
 
 ```mermaid
 flowchart TD
@@ -26,6 +30,8 @@ flowchart TD
     STEP["⚡ Action → env.step()\nKEEP / BORDERLINE / REJECT + reasoning"] --> SCORE
     SCORE["🏁 Deterministic Grader\nformat + label + reasoning + calibration\n0.00 – 1.00"]
 ```
+
+## Baseline Performance
 
 ```mermaid
 xychart-beta

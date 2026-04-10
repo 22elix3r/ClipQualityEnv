@@ -4,7 +4,7 @@ FROM ${BASE_IMAGE} AS builder
 WORKDIR /app
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommended git ffmpeg && \
+    apt-get install -y --no-install-recommends git ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 ARG BUILD_MODE=in-repo
