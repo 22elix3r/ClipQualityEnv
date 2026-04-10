@@ -309,3 +309,27 @@ def score(
     difficulty: str | None = None,
 ) -> float:
     return float(grade(action, clip, rubric, gt, difficulty=difficulty).total)
+
+
+def grade_task_easy(action_dict: dict, clip: dict) -> float:
+    """Grader endpoint for task_easy — referenced in openenv.yaml."""
+    from .rubric import RubricState
+    from .ground_truth import GTStore
+    action = Action.model_validate(action_dict) if isinstance(action_dict, dict) else action_dict
+    return float(grade(action, clip, RubricState(), GTStore(), difficulty="easy").total)
+
+
+def grade_task_medium(action_dict: dict, clip: dict) -> float:
+    """Grader endpoint for task_medium — referenced in openenv.yaml."""
+    from .rubric import RubricState
+    from .ground_truth import GTStore
+    action = Action.model_validate(action_dict) if isinstance(action_dict, dict) else action_dict
+    return float(grade(action, clip, RubricState(), GTStore(), difficulty="medium").total)
+
+
+def grade_task_hard(action_dict: dict, clip: dict) -> float:
+    """Grader endpoint for task_hard — referenced in openenv.yaml."""
+    from .rubric import RubricState
+    from .ground_truth import GTStore
+    action = Action.model_validate(action_dict) if isinstance(action_dict, dict) else action_dict
+    return float(grade(action, clip, RubricState(), GTStore(), difficulty="hard").total)

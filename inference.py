@@ -491,7 +491,7 @@ def run_episode(
         )
 
         print(
-            f"[STEP] step={step_num} label={action_name} reward={reward:.2f} "
+            f"[STEP] step={step_num} action={action_name} reward={reward:.2f} "
             f"done={str(done).lower()} error=null",
             flush=True,
         )
@@ -504,8 +504,7 @@ def run_episode(
     success = score >= 0.70
     rewards_str = ",".join([f"{r:.2f}" for r in rewards]) if rewards else "0.00"
     print(
-        f"[END] success={str(success).lower()} steps={step_num} score={score:.3f} "
-        f"total_reward={total_reward:.3f} final_reward={final_reward:.3f} rewards={rewards_str}",
+        f"[END] task={task_id} success={str(success).lower()} steps={step_num} score={score:.2f} rewards={rewards_str}",
         flush=True,
     )
 

@@ -62,7 +62,9 @@ def test_run_episode_preserves_logging_and_structure(capsys):
     result = inference.run_episode("task_easy", client, "dummy-model")
     output = capsys.readouterr().out
     assert "[START]" in output and "[STEP]" in output and "[END]" in output
-    assert "total_reward=" in output and "final_reward=" in output
+    assert "task=task_easy" in output and "score=" in output and "rewards=" in output
+    # [STEP] lines use action= not label=
+    assert "action=KEEP" in output
     assert result["task_id"] == "task_easy"
     assert result["mode"] == "llm"
     assert result["steps"] == 25

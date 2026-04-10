@@ -5,6 +5,11 @@ from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
+from openenv.core.env_server.types import (
+    Action as OEAction,
+    Observation as OEObservation,
+    State as OEState,
+)
 
 
 class ClipLabel(str, Enum):
@@ -13,7 +18,7 @@ class ClipLabel(str, Enum):
     REJECT = "REJECT"
 
 
-class Action(BaseModel):
+class Action(OEAction):
     """Agent action for clip-quality classification."""
 
     label: Literal["KEEP", "BORDERLINE", "REJECT"] = Field(description="Predicted clip label")
@@ -30,6 +35,7 @@ class TaskInfo(BaseModel):
     difficulty: str
     description: str
     action_schema: dict
+    grader: str = Field(default="", description="Dotted Python path to grader function")
 
 
 class CorpusIncident(BaseModel):
@@ -42,12 +48,7 @@ class CorpusIncident(BaseModel):
 
 
 class ClipMetadata(BaseModel):
-    """Clip metadata payload consumed by the agent.
-
-    NOTE: expected_label is intentionally excluded from this model.
-    It lives only on the raw clip dict inside EpisodeClip.clip and is
-    accessed by the grader directly — never serialised to the agent.
-    """
+    """Clip metadata payload consumed by the agent."""
 
     clip_id: str
     duration_s: Optional[float] = Field(default=None, ge=0.0)
@@ -69,7 +70,6 @@ class ClipMetadata(BaseModel):
     occlusion_present: bool = False
     environment_tag: Optional[str] = None
     framing: Optional[str] = None
-    # Option-A enriched features
     sharpness_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     temporal_flicker: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     bg_entropy: Optional[float] = Field(default=None, ge=0.0, le=1.0)
@@ -84,7 +84,7 @@ class HistoryItem(BaseModel):
     step: int = 0
     clip_id: str = ""
     label: str = ""       # the agent's own submitted label
-    reward: float = 0.0   # reward signal — the only feedback the agent gets
+    reward: float = 0.0   # reward signal
     model_config = {"extra": "ignore"}
 
 
@@ -98,7 +98,7 @@ class EpisodeHistoryItem(BaseModel):
     model_config = {"extra": "allow"}
 
 
-class Observation(BaseModel):
+class Observation(OEObservation):
     """What the agent sees after reset() or step()."""
 
     task_id: str
@@ -119,7 +119,7 @@ class Observation(BaseModel):
     model_config = {"extra": "allow"}
 
 
-class State(BaseModel):
+class State(OEState):
     """Episode metadata — returned by state() endpoint."""
 
     episode_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -136,7 +136,6 @@ class State(BaseModel):
     actions_taken: List[str] = Field(default_factory=list)
     episode_history: List[EpisodeHistoryItem] = Field(default_factory=list)
     rubric_thresholds: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
-    # Multi-episode curriculum tracking
     curriculum_level: str = Field(default="easy", description="Current curriculum difficulty level")
     curriculum_history: List[Dict[str, Any]] = Field(
         default_factory=list,

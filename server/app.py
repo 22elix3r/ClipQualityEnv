@@ -10,7 +10,7 @@ import gradio as gr
 import pandas as pd
 import uvicorn
 from fastapi import BackgroundTasks, HTTPException
-from openenv.core.env_server import create_fastapi_app
+from openenv.core.env_server.http_server import create_app
 
 import inference
 from clip_quality_env.icl_memory import ICLMemory
@@ -134,10 +134,12 @@ def _input_tab_update_for_task(task_id: str) -> dict[str, Any]:
     return gr.update(selected=_input_tab_for_task(task_id))
 
 
-app = create_fastapi_app(
-    env=ClipQualityEnvironment,
-    action_cls=Action,
-    observation_cls=Observation,
+app = create_app(
+    ClipQualityEnvironment,
+    Action,
+    Observation,
+    env_name="clip_quality_env",
+    max_concurrent_envs=25,
 )
 # Replace selected OpenEnv defaults with reference-style handlers.
 overridden_paths = {_normalized_path(path) for path in OVERRIDDEN_ROUTES}
@@ -220,18 +222,10 @@ def list_tasks() -> list[TaskInfo]:
             difficulty=task["difficulty"],
             description=_surface_task_description(task_id, task["description"]),
             action_schema=Action.model_json_schema(),
+            grader=f"clip_quality_env.grader.grade_{task_id}",
         )
         for task_id, task in TASK_REGISTRY.items()
     ]
-    # Add the virtual mixed-difficulty task
-    tasks.append(
-        TaskInfo(
-            task_id="task_mixed",
-            difficulty="mixed",
-            description="Mixed-difficulty episode: progressive difficulty escalation from easy through hard within a single episode.",
-            action_schema=Action.model_json_schema(),
-        )
-    )
     return tasks
 
 
@@ -1259,15 +1253,15 @@ custom_demo = build_custom_ui()
 app = gr.mount_gradio_app(app, custom_demo, path="/dashboard/")
 
 
-def main(host: str = "0.0.0.0", port: int = 8000) -> None:
+def main(host: str = "0.0.0.0", port: int = 7860) -> None:
     uvicorn.run("server.app:app", host=host, port=port, reload=False)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=7860)
     args = parser.parse_args()
-    if args.port == 8000:
+    if args.port == 7860:
         main()
     else:
         main(port=args.port)

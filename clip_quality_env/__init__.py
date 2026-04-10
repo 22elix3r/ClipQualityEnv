@@ -1,35 +1,9 @@
 """Clip-quality environment package."""
 
-from .client import ClipQualityClient
-from .env import ClipQualityEnv, ClipQualityEnvironment
+from .client import ClipQualityClient as ClipQualityEnv
 from .models import (
-    Action,
-    ClipLabel,
-    ClipMetadata,
-    CorpusIncident,
-    EnvironmentState,
-    EpisodeHistoryItem,
-    HistoryItem,
-    Observation,
-    Reward,
-    State,
-    TaskInfo,
+    Action as ClipQualityAction,
+    Observation as ClipQualityObservation,
 )
 
-
-__all__ = [
-    "Action",
-    "ClipLabel",
-    "ClipMetadata",
-    "ClipQualityClient",
-    "ClipQualityEnv",
-    "ClipQualityEnvironment",
-    "CorpusIncident",
-    "EnvironmentState",
-    "EpisodeHistoryItem",
-    "HistoryItem",
-    "Observation",
-    "Reward",
-    "State",
-    "TaskInfo",
-]
+__all__ = ["ClipQualityAction", "ClipQualityObservation", "ClipQualityEnv"]

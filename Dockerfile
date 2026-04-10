@@ -1,27 +1,52 @@
-FROM python:3.11-slim
+ARG BASE_IMAGE=ghcr.io/meta-pytorch/openenv-base:latest
+FROM ${BASE_IMAGE} AS builder
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ffmpeg \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y --no-install-recommended git ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
-COPY server/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+ARG BUILD_MODE=in-repo
+ARG ENV_NAME=clip_quality_env
 
-# Copy all source code
-COPY . /app
+COPY . /app/env
+WORKDIR /app/env
 
-EXPOSE 8000
+RUN if ! command -v uv >/dev/null 2>&1; then \
+        curl -LsSf https://astral.sh/uv/install.sh | sh && \
+        mv /root/.local/bin/uv /usr/local/bin/uv && \
+        mv /root/.local/bin/uvx /usr/local/bin/uvx; \
+    fi
 
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ -f uv.lock ]; then \
+        uv sync --frozen --no-install-project --no-editable; \
+    else \
+        uv sync --no-install-project --no-editable; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ -f uv.lock ]; then \
+        uv sync --frozen --no-editable; \
+    else \
+        uv sync --no-editable; \
+    fi
+
+# Final runtime stage
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+
+COPY --from=builder /app/env/.venv /app/.venv
+COPY --from=builder /app/env /app/env
+
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH="/app/env:$PYTHONPATH"
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
-ENV ENABLE_WEB_INTERFACE=true
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD sh -lc 'curl -f http://localhost:${PORT:-8000}/health || exit 1'
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:7860/health || exit 1
 
-CMD ["sh", "-lc", "python -m uvicorn server.app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+EXPOSE 7860
+CMD ["sh", "-c", "cd /app/env && uvicorn server.app:app --host 0.0.0.0 --port 7860"]

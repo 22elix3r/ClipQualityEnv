@@ -1,33 +1,31 @@
 spec_version: 1
 name: clip_quality_env
+version: 1.0.0
 type: space
 runtime: fastapi
 app: server.app:app
-port: 8000
+port: 7860
 description: >
   CLIP Quality Analyzer environment with OpenEnv reference structure for
   clip-case review, quality-rule refinement, and deterministic scoring.
 tasks:
-  - task_easy
-  - task_medium
-  - task_hard
-  - task_mixed
-grader:
-  endpoint: /grader
-  deterministic: true
-  score_range: [0.0, 1.0]
-baseline:
-  script: inference.py
-  command: "PYTHONPATH=. python inference.py"
-  expected_scores:
-    task_easy: 0.7805
-    task_medium: 0.7545
-    task_hard: 0.5996
-    task_mixed: 0.6793
+  - id: task_easy
+    description: "Classify clips with clear quality signals and metadata-based reasoning."
+    grader: clip_quality_env.grader.grade_task_easy
+  - id: task_medium
+    description: "Classify borderline clips by balancing mixed quality indicators."
+    grader: clip_quality_env.grader.grade_task_medium
+  - id: task_hard
+    description: "Classify difficult clips with conflicting signals and trade-off reasoning."
+    grader: clip_quality_env.grader.grade_task_hard
 tags:
   - openenv
   - reinforcement-learning
-  - clip-quality
-  - quality-analysis
-  - clip-review
-  - hackathon-2026
+  - talking-head
+  - audio-visual
+  - lora
+  - dataset-curation
+  - automatic-grading
+canonical_repo: https://huggingface.co/spaces/elix3r/clip-quality-env
+author: elix3r
+license: MIT

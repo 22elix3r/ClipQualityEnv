@@ -3,7 +3,7 @@ title: CLIP Quality Analyzer
 colorFrom: purple
 colorTo: gray
 sdk: docker
-app_port: 8000
+app_port: 7860
 base_path: /dashboard/
 tags:
   - openenv
@@ -15,9 +15,25 @@ tags:
   - talking-head
 ---
 
-# ClipQualityEnv
-
 An OpenEnv-compliant reinforcement learning environment for curating high-quality talking-head video clips intended for Audio-Visual (AV) LoRA fine-tuning. The agent learns to classify clips as KEEP, BORDERLINE, or REJECT by evaluating per-clip metadata against a versioned quality rubric, ensuring only the cleanest, most training-appropriate clips make it into a LoRA dataset.
+
+```mermaid
+flowchart TD
+    CFG["⚙️ Task Config\ntask_id = task_easy | task_medium | task_hard"] --> ENV
+    ENV["🎬 ClipQualityEnv\n25-step clip review episodes"] --> OBS
+    OBS["📋 Observation\n• clip_metadata (14 features)\n• rubric_summary\n• ICL history"] --> AGT
+    AGT["🤖 LLM Agent\nICL-RL Feedback Loop"] --> STEP
+    STEP["⚡ Action → env.step()\nKEEP / BORDERLINE / REJECT + reasoning"] --> SCORE
+    SCORE["🏁 Deterministic Grader\nformat + label + reasoning + calibration\n0.00 – 1.00"]
+```
+
+```mermaid
+xychart-beta
+    title "ClipQualityEnv Baseline Scores (Deterministic Fallback)"
+    x-axis ["task_easy", "task_medium", "task_hard"]
+    y-axis "Average Reward" 0.00 --> 1.00
+    bar [0.78, 0.75, 0.60]
+```
 
 ## Reference Model
 
@@ -186,6 +202,22 @@ Each task corpus contains 25 clips with balanced label distributions across KEEP
 | `GET` | `/schema` | OpenEnv action/observation schema |
 | `GET` | `/dashboard/` | Gradio interactive dashboard |
 
+### Quick Start (curl)
+
+```bash
+# Health Check
+curl http://localhost:7860/health
+
+# List Tasks (includes grader paths)
+curl http://localhost:7860/tasks
+
+# Reset Environment
+curl -X POST http://localhost:7860/reset -H "Content-Type: application/json" -d '{"task_id": "task_easy"}'
+
+# Submit Step
+curl -X POST http://localhost:7860/step -H "Content-Type: application/json" -d '{"label": "KEEP", "reasoning": "face_confidence is 0.95", "confidence": 0.9, "clip_id": "clip_0001"}'
+```
+
 The `/grader` endpoint accepts the same action schema as `/step`:
 
 ```json
@@ -224,7 +256,7 @@ pip install -r requirements.txt
 Run the server:
 
 ```bash
-PYTHONPATH=. python -m uvicorn server.app:app --host 0.0.0.0 --port 8000
+PYTHONPATH=. python -m uvicorn server.app:app --host 0.0.0.0 --port 7860
 ```
 
 Run tests:
@@ -287,7 +319,7 @@ The manifest is loaded at startup if present at `data/real_clips_manifest.jsonl`
 
 ```bash
 docker build -f server/Dockerfile -t clip-quality-env .
-docker run -p 8000:8000 -e HF_TOKEN=your_token clip-quality-env
+docker run -p 7860:7860 -e HF_TOKEN=your_token clip-quality-env
 ```
 
 ## Deployment
