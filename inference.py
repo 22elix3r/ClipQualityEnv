@@ -579,6 +579,11 @@ def run_baseline(
                 mode = "llm" if client is not None else "deterministic"
                 eff_steps = max_steps or 25
                 print(f"[START] task={task_id} episode={ep} seed={seed} mode={mode} max_steps={eff_steps}", flush=True)
+                print(
+                    f"[STEP] task={task_id} episode={ep} step=1 action=NONE"
+                    " patient_id=None reward=0.0000 done=false status=error",
+                    flush=True,
+                )
                 print(f"[END] task={task_id} episode={ep} seed={seed} score=0.0000 steps=0 done=false", flush=True)
                 results.append(
                     {
